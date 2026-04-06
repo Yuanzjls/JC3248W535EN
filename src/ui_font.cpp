@@ -18,10 +18,11 @@
 static const char *k_sd_mount = "/sd";
 
 /*
- * Try these in order (Arduino path, LVGL path for same file).
- * Put UI_FONT_16.bin either in fonts/ on the card or at the root of the card.
+ * Arduino SD paths are relative to the mount: VFSImpl does mountpoint+fpath, so use
+ * "/fonts/..." not "/sd/fonts/..." (the latter becomes /sd/sd/fonts/...).
+ * LVGL uses LV_FS_POSIX_PATH + path after "S:" — keep S:/... as-is.
  */
-static const char *const k_try_arduino[] = {"/sd/fonts/UI_FONT_16.bin", "/sd/UI_FONT_16.bin"};
+static const char *const k_try_arduino[] = {"/fonts/UI_FONT_16.bin", "/UI_FONT_16.bin"};
 static const char *const k_try_lvgl[] = {"S:/fonts/UI_FONT_16.bin", "S:/UI_FONT_16.bin"};
 
 static const size_t k_try_n = sizeof(k_try_arduino) / sizeof(k_try_arduino[0]);
@@ -34,17 +35,17 @@ static const char *s_path_arduino = nullptr;
 static const char *s_path_lvgl = nullptr;
 
 static void sd_list_root(void) {
-    File root = SD.open(k_sd_mount);
+    File root = SD.open("/");
     if (!root) {
-        serial_log("[ui_font] diag: cannot open %s", k_sd_mount);
+        serial_log("[ui_font] diag: cannot open SD root (mount %s) — SD.begin failed or card missing?", k_sd_mount);
         return;
     }
     if (!root.isDirectory()) {
-        serial_log("[ui_font] diag: %s is not a directory", k_sd_mount);
+        serial_log("[ui_font] diag: SD root is not a directory");
         root.close();
         return;
     }
-    serial_log("[ui_font] diag: listing %s/ (max 24 entries)", k_sd_mount);
+    serial_log("[ui_font] diag: listing card root %s/ (max 24 entries)", k_sd_mount);
     File f = root.openNextFile();
     unsigned n = 0;
     while (f && n < 24) {
@@ -70,7 +71,7 @@ static bool pick_font_file(void) {
             return true;
         }
     }
-    serial_log("[ui_font] no UI_FONT_16.bin — add fonts/UI_FONT_16.bin or /sd/UI_FONT_16.bin on card");
+    serial_log("[ui_font] no UI_FONT_16.bin — add fonts/UI_FONT_16.bin or UI_FONT_16.bin at card root");
     sd_list_root();
     return false;
 }

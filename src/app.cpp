@@ -6,6 +6,7 @@
 #include "esp_bsp.h"
 #include "lv_port.h"
 #include "ui_font.h"
+#include "wifi_store.h"
 #include "wifi_ui.h"
 
 
@@ -30,6 +31,7 @@ void setup()
   serial_log("[app] boot: starting");
 
   (void)ui_font_mount_sd();
+  wifi_store_begin();
 
   size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   bsp_display_cfg_t cfg = {

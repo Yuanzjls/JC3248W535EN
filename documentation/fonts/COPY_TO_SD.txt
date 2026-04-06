@@ -1,0 +1,20 @@
+UI_FONT_16.bin (LVGL v8, Noto Sans SC subset, OFL license)
+================================================================================
+
+Copy this file to the microSD card as either:
+  fonts/UI_FONT_16.bin   (recommended)
+  or
+  UI_FONT_16.bin         (at the root of the FAT volume)
+
+The firmware mounts the card at /sd and loads the font automatically.
+
+Included glyph ranges (16 px, 4 bpp):
+  - ASCII 0x20-0x7E
+  - CJK punctuation 0x3000-0x303F
+  - Fullwidth forms 0xFF00-0xFFEF
+  - CJK Unified Ideographs 0x4E00-0x9FFF (full BMP CJK block — needed for SSIDs like 阿波菲尔迪基地)
+
+To regenerate after editing ranges, run from repo root:
+  powershell -ExecutionPolicy Bypass -File tools/font_gen/regenerate_font.ps1
+
+Source: Noto Sans SC from https://github.com/googlefonts/noto-cjk (SIL OFL 1.1)
