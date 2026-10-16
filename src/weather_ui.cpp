@@ -11,9 +11,12 @@
 #include "ui_font.h"
 #include "ui_theme.h"
 
-static const int k_fc_cards = 4; /* forecast cards: days 1..4 (day 0 is shown in the main panel) */
-static const lv_coord_t k_main_icon = 92;
-static const lv_coord_t k_fc_icon = 44;
+static const int k_day_cards = k_weather_days - 1; /* days 1..6; today is in the main panel */
+static const lv_coord_t k_main_icon = 80;
+static const lv_coord_t k_fc_icon = 36;
+
+enum class FcMode { Hourly, Daily };
+static FcMode s_mode = FcMode::Hourly;
 
 static WeatherData s_data;
 static char s_tile_text[12] = "--\xC2\xB0";
@@ -26,12 +29,18 @@ static lv_obj_t *s_cond = nullptr;
 static lv_obj_t *s_details = nullptr;
 static lv_obj_t *s_status = nullptr;
 
+/** One forecast card: label (time/day) / icon / temperature(s) / precipitation chance. */
 struct FcCard {
-    lv_obj_t *day;
+    lv_obj_t *card;
+    lv_obj_t *top;
     lv_obj_t *icon;
-    lv_obj_t *range;
+    lv_obj_t *temp;
+    lv_obj_t *pop;
 };
-static FcCard s_fc[k_fc_cards];
+static lv_obj_t *s_hourly_strip = nullptr;
+static lv_obj_t *s_daily_strip = nullptr;
+static FcCard s_hour_cards[k_weather_hours];
+static FcCard s_day_cards[k_day_cards];
 
 /* ---------- icons: built from circles / rounded rects so no image assets are needed ---------- */
 
@@ -123,6 +132,12 @@ static void fmt_temp(char *buf, size_t n, float t) {
     snprintf(buf, n, "%d\xC2\xB0", (int)lroundf(t));
 }
 
+/** Precipitation chance, always shown; 0% is muted so non-zero chances stand out in blue. */
+static void set_pop(lv_obj_t *label, int pop) {
+    lv_label_set_text_fmt(label, "%d%%", pop);
+    lv_obj_set_style_text_color(label, pop > 0 ? lv_palette_main(LV_PALETTE_BLUE) : ui_color_text_muted(), 0);
+}
+
 /** "Mon".."Sun" for a "YYYY-MM-DD" date string. */
 static const char *weekday_name(const char *date) {
     static const char *const k_names[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -203,15 +218,86 @@ static void update_screen(void) {
     lv_label_set_text_fmt(s_details, "Feels like  %s\nHigh / Low  %s / %s\nHumidity  %d%%\nWind  %d %s", feels, hi, lo,
                           wd.humidity, (int)lroundf(wd.wind), wd.fahrenheit ? "mph" : "km/h");
 
-    for (int i = 0; i < k_fc_cards; i++) {
+    for (int i = 0; i < k_weather_hours; i++) {
+        const FcCard &c = s_hour_cards[i];
+        if (i >= wd.hour_count) {
+            lv_obj_add_flag(c.card, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const WeatherHour &h = wd.hours[i];
+        lv_obj_clear_flag(c.card, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(c.top, i == 0 ? "Now" : h.time);
+        draw_icon(c.icon, k_fc_icon, h.code, h.is_day);
+        fmt_temp(t, sizeof(t), h.temp);
+        lv_label_set_text(c.temp, t);
+        set_pop(c.pop, h.pop);
+    }
+
+    for (int i = 0; i < k_day_cards; i++) {
+        const FcCard &c = s_day_cards[i];
         const WeatherDay &d = wd.days[i + 1];
-        lv_label_set_text(s_fc[i].day, i == 0 ? "Tomorrow" : weekday_name(d.date));
-        draw_icon(s_fc[i].icon, k_fc_icon, d.code, true);
+        lv_label_set_text(c.top, i == 0 ? "Tomorrow" : weekday_name(d.date));
+        draw_icon(c.icon, k_fc_icon, d.code, true);
         fmt_temp(hi, sizeof(hi), d.t_max);
         fmt_temp(lo, sizeof(lo), d.t_min);
-        lv_label_set_text_fmt(s_fc[i].range, "%s / %s", hi, lo);
+        lv_label_set_text_fmt(c.temp, "%s / %s", hi, lo);
+        set_pop(c.pop, d.pop);
     }
     update_status_label();
+}
+
+static void show_mode(FcMode m) {
+    s_mode = m;
+    if (m == FcMode::Hourly) {
+        lv_obj_clear_flag(s_hourly_strip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_daily_strip, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_hourly_strip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_daily_strip, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void mode_btns_cb(lv_event_t *e) {
+    lv_obj_t *bm = lv_event_get_target(e);
+    const uint16_t sel = lv_btnmatrix_get_selected_btn(bm);
+    if (sel == 0 || sel == 1) {
+        show_mode(sel == 0 ? FcMode::Hourly : FcMode::Daily);
+    }
+}
+
+/** Horizontally swipeable strip of forecast cards (fills the remaining screen height). */
+static lv_obj_t *make_strip(lv_obj_t *parent) {
+    lv_obj_t *s = lv_obj_create(parent);
+    lv_obj_remove_style_all(s);
+    lv_obj_set_width(s, LV_PCT(100));
+    lv_obj_set_flex_grow(s, 1);
+    lv_obj_set_flex_flow(s, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s, 6, 0);
+    lv_obj_set_scroll_dir(s, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(s, LV_SCROLLBAR_MODE_OFF);
+    return s;
+}
+
+static void make_card(lv_obj_t *strip, lv_coord_t width, FcCard *out) {
+    lv_obj_t *card = lv_obj_create(strip);
+    lv_obj_set_size(card, width, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(card, 4, 0);
+    lv_obj_set_style_pad_row(card, 2, 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    /* Let horizontal drags on a card scroll the strip. */
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
+    out->card = card;
+    out->top = make_label(card, &lv_font_montserrat_14, ui_color_text(), "--");
+    out->icon = lv_obj_create(card);
+    lv_obj_remove_style_all(out->icon);
+    lv_obj_set_size(out->icon, k_fc_icon, k_fc_icon);
+    lv_obj_clear_flag(out->icon, LV_OBJ_FLAG_SCROLLABLE);
+    out->temp = make_label(card, &lv_font_montserrat_16, ui_color_text(), "--");
+    out->pop = make_label(card, &lv_font_montserrat_12, lv_palette_main(LV_PALETTE_BLUE), "");
 }
 
 static void build_screen(void) {
@@ -254,31 +340,65 @@ static void build_screen(void) {
     s_temp = make_label(mid, &lv_font_montserrat_48, ui_color_text(), "--\xC2\xB0");
     s_cond = make_label(mid, ui_font_get(), ui_color_text_muted(), "");
 
-    s_details = make_label(main, &lv_font_montserrat_16, ui_color_text_muted(), "");
+    s_details = make_label(main, &lv_font_montserrat_14, ui_color_text_muted(), "");
     lv_obj_set_flex_grow(s_details, 1);
-    lv_obj_set_style_text_line_space(s_details, 4, 0);
+    lv_obj_set_style_text_line_space(s_details, 3, 0);
 
-    /* 4-day forecast */
-    lv_obj_t *fc = make_row(s_scr);
-    lv_obj_set_flex_align(fc, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    for (int i = 0; i < k_fc_cards; i++) {
-        lv_obj_t *card = lv_obj_create(fc);
-        lv_obj_set_size(card, LV_PCT(23), LV_SIZE_CONTENT);
-        lv_obj_set_style_pad_all(card, 6, 0);
-        lv_obj_set_style_pad_row(card, 4, 0);
-        lv_obj_set_style_radius(card, 12, 0);
-        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-        s_fc[i].day = make_label(card, &lv_font_montserrat_16, ui_color_text(), "--");
-        s_fc[i].icon = lv_obj_create(card);
-        lv_obj_remove_style_all(s_fc[i].icon);
-        lv_obj_set_size(s_fc[i].icon, k_fc_icon, k_fc_icon);
-        lv_obj_clear_flag(s_fc[i].icon, LV_OBJ_FLAG_SCROLLABLE);
-        s_fc[i].range = make_label(card, &lv_font_montserrat_14, ui_color_text_muted(), "-- / --");
+    /* Forecast mode toggle | "Updated hh:mm" */
+    lv_obj_t *tabs = make_row(s_scr);
+    lv_obj_set_style_pad_column(tabs, 10, 0);
+    static const char *k_mode_map[] = {"Hourly", "Daily", ""};
+    lv_obj_t *bm = lv_btnmatrix_create(tabs);
+    lv_btnmatrix_set_map(bm, k_mode_map);
+    lv_btnmatrix_set_btn_ctrl_all(bm, LV_BTNMATRIX_CTRL_CHECKABLE);
+    lv_btnmatrix_set_one_checked(bm, true);
+    lv_btnmatrix_set_btn_ctrl(bm, s_mode == FcMode::Hourly ? 0 : 1, LV_BTNMATRIX_CTRL_CHECKED);
+    lv_obj_set_size(bm, 180, 34);
+
+    /* Segmented control: grey pill track, selected option is a white pill with dark text. */
+    lv_obj_set_style_bg_color(bm, ui_color_track(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bm, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bm, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(bm, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bm, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_gap(bm, 3, LV_PART_MAIN);
+
+    lv_obj_set_style_text_font(bm, &lv_font_montserrat_14, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(bm, ui_color_text_muted(), LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(bm, LV_OPA_TRANSP, LV_PART_ITEMS);
+    lv_obj_set_style_border_width(bm, 0, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(bm, 0, LV_PART_ITEMS);
+    lv_obj_set_style_radius(bm, LV_RADIUS_CIRCLE, LV_PART_ITEMS);
+
+    lv_obj_set_style_bg_opa(bm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(bm, ui_color_surface(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(bm, ui_color_text(), LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_shadow_width(bm, 6, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_shadow_opa(bm, LV_OPA_20, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_shadow_ofs_y(bm, 1, LV_PART_ITEMS | LV_STATE_CHECKED);
+
+    /* Light press feedback on either option; no focus outline from touch. */
+    lv_obj_set_style_bg_opa(bm, LV_OPA_50, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(bm, ui_color_surface(), LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_outline_width(bm, 0, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(bm, 0, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_event_cb(bm, mode_btns_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_status = make_label(tabs, &lv_font_montserrat_12, ui_color_text_muted(), "");
+    lv_obj_set_flex_grow(s_status, 1);
+    lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(s_status, LV_LABEL_LONG_DOT);
+
+    /* Two swipeable strips; the toggle shows one at a time. */
+    s_hourly_strip = make_strip(s_scr);
+    for (int i = 0; i < k_weather_hours; i++) {
+        make_card(s_hourly_strip, 70, &s_hour_cards[i]);
     }
-
-    s_status = make_label(s_scr, &lv_font_montserrat_12, ui_color_text_muted(), "");
+    s_daily_strip = make_strip(s_scr);
+    for (int i = 0; i < k_day_cards; i++) {
+        make_card(s_daily_strip, 104, &s_day_cards[i]);
+    }
+    show_mode(s_mode);
 
     update_screen();
 }

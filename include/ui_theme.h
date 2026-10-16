@@ -11,3 +11,5 @@ static inline lv_color_t ui_color_bg(void) { return lv_color_hex(0xF2F4F7); }   
 static inline lv_color_t ui_color_text(void) { return lv_color_hex(0x1C2024); }       /* primary text */
 static inline lv_color_t ui_color_text_muted(void) { return lv_color_hex(0x5F6B7A); } /* hints, status */
 static inline lv_color_t ui_color_tick(void) { return lv_color_hex(0x9AA4B0); }       /* clock minor ticks */
+static inline lv_color_t ui_color_surface(void) { return lv_color_white(); }          /* cards, selected pill */
+static inline lv_color_t ui_color_track(void) { return lv_color_hex(0xE2E6EB); }      /* segmented-control track */

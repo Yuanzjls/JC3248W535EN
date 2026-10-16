@@ -143,7 +143,8 @@ static bool fetch_forecast(WeatherData *wd) {
     String url = "http://api.open-meteo.com/v1/forecast?latitude=" + String(s_cfg.lat, 4) +
                  "&longitude=" + String(s_cfg.lon, 4) +
                  "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"
-                 "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+                 "&hourly=temperature_2m,weather_code,precipitation_probability,is_day"
+                 "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
                  "&timezone=auto&forecast_days=" +
                  String(k_weather_days);
     if (fahrenheit) {
@@ -183,6 +184,28 @@ static bool fetch_forecast(WeatherData *wd) {
         wd->days[i].code = daily["weather_code"][i] | 0;
         wd->days[i].t_max = daily["temperature_2m_max"][i] | 0.0f;
         wd->days[i].t_min = daily["temperature_2m_min"][i] | 0.0f;
+        wd->days[i].pop = daily["precipitation_probability_max"][i] | 0;
+    }
+
+    /*
+     * Hourly series starts at 00:00 today (local, timezone=auto). Skip hours before the current
+     * one by comparing "YYYY-MM-DDTHH" prefixes with current.time, then take the next 24.
+     */
+    JsonObject hourly = doc["hourly"];
+    const char *now_iso = cur["time"] | "";
+    JsonArray h_time = hourly["time"];
+    wd->hour_count = 0;
+    for (size_t i = 0; i < h_time.size() && wd->hour_count < k_weather_hours; i++) {
+        const char *ts = h_time[i] | "";
+        if (strlen(ts) < 16 || strncmp(ts, now_iso, 13) < 0) {
+            continue;
+        }
+        WeatherHour &h = wd->hours[wd->hour_count++];
+        strlcpy(h.time, ts + 11, sizeof(h.time));
+        h.code = hourly["weather_code"][i] | 0;
+        h.temp = hourly["temperature_2m"][i] | 0.0f;
+        h.pop = hourly["precipitation_probability"][i] | 0;
+        h.is_day = (hourly["is_day"][i] | 1) != 0;
     }
     const time_t now = time(nullptr);
     wd->updated = now > 1700000000 ? now : 0;
