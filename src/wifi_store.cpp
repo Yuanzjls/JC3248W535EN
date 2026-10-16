@@ -1,6 +1,8 @@
 #include "wifi_store.h"
 
 #include <SD.h>
+#include <algorithm>
+#include <string.h>
 #include <vector>
 #include <WiFi.h>
 
@@ -192,10 +194,77 @@ void wifi_store_promote(const String &ssid) {
     (void)write_to_sd();
 }
 
-static int s_ac_state = 0;
+/*
+ * Auto-connect: scan first, then try the saved networks that are actually visible, strongest
+ * first, targeting the scanned channel + BSSID. Saved networks not seen in the scan (out of
+ * range, or hidden SSIDs) are tried last. Blindly trying them in saved order wasted ~12 s on
+ * an unreachable network every boot.
+ */
+enum class AcState { Idle, Scanning, Connecting, Settling };
+
+struct AcCandidate {
+    size_t idx;     /* into s_known */
+    int32_t rssi;   /* -127 if not seen in the scan */
+    int32_t channel;
+    uint8_t bssid[6];
+    bool seen;
+};
+
+static AcState s_ac_state = AcState::Idle;
+static std::vector<AcCandidate> s_ac_list;
 static size_t s_ac_i = 0;
 static uint32_t s_ac_deadline = 0;
-static const uint32_t k_ac_timeout_ms = 12000;
+static uint32_t s_ac_scan_start = 0;
+static const uint32_t k_ac_timeout_ms = 12000; /* per network */
+static const uint32_t k_ac_scan_timeout_ms = 6000;
+/* After disconnect, let the driver leave "connecting" before the next begin(); begin() too soon
+ * fails with "sta is connecting, cannot set config". */
+static const uint32_t k_ac_settle_ms = 800;
+
+static void build_candidates(int n) {
+    s_ac_list.clear();
+    for (size_t k = 0; k < s_known.size(); k++) {
+        AcCandidate c = {k, -127, 0, {0}, false};
+        for (int i = 0; i < n; i++) {
+            if (WiFi.SSID(i) == s_known[k].first && WiFi.RSSI(i) > c.rssi) {
+                c.rssi = WiFi.RSSI(i);
+                c.channel = WiFi.channel(i);
+                memcpy(c.bssid, WiFi.BSSID(i), sizeof(c.bssid));
+                c.seen = true;
+            }
+        }
+        s_ac_list.push_back(c);
+    }
+    /* Visible networks first, strongest first; unseen keep their saved order at the end. */
+    std::stable_sort(s_ac_list.begin(), s_ac_list.end(), [](const AcCandidate &a, const AcCandidate &b) {
+        if (a.seen != b.seen) {
+            return a.seen;
+        }
+        return a.seen && a.rssi > b.rssi;
+    });
+    for (const auto &c : s_ac_list) {
+        if (c.seen) {
+            serial_log("[wifi]   saved \"%s\" visible: %d dBm, ch %d", s_known[c.idx].first.c_str(), (int)c.rssi,
+                       (int)c.channel);
+        } else {
+            serial_log("[wifi]   saved \"%s\" not seen in scan", s_known[c.idx].first.c_str());
+        }
+    }
+}
+
+static void begin_candidate(void) {
+    const AcCandidate &c = s_ac_list[s_ac_i];
+    const auto &net = s_known[c.idx];
+    serial_log("[wifi] trying saved \"%s\" (%u/%u)%s", net.first.c_str(), (unsigned)(s_ac_i + 1),
+               (unsigned)s_ac_list.size(), c.seen ? "" : " - not in scan, trying anyway");
+    if (c.seen) {
+        WiFi.begin(net.first.c_str(), net.second.c_str(), c.channel, c.bssid);
+    } else {
+        WiFi.begin(net.first.c_str(), net.second.c_str());
+    }
+    s_ac_state = AcState::Connecting;
+    s_ac_deadline = millis() + k_ac_timeout_ms;
+}
 
 bool wifi_store_autoconnect_start(void) {
     if (!s_loaded) {
@@ -204,43 +273,69 @@ bool wifi_store_autoconnect_start(void) {
     if (s_known.empty()) {
         return false;
     }
-    s_ac_state = 1;
-    s_ac_i = 0;
     /* disconnect(false): keep the radio on. disconnect(true) stops WiFi, and restarting it right away
      * races the async STA_STOP event, leaving the driver "not started" so connect silently fails. */
     WiFi.disconnect(false);
-    delay(100);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(s_known[0].first.c_str(), s_known[0].second.c_str());
-    s_ac_deadline = millis() + k_ac_timeout_ms;
+    s_ac_i = 0;
+    s_ac_scan_start = millis();
+    const int16_t r = WiFi.scanNetworks(true /*async*/, false /*hidden*/, false /*passive*/, 120 /*ms/channel*/);
+    if (r == WIFI_SCAN_FAILED) {
+        serial_log("[wifi] scan failed, trying saved networks in order");
+        build_candidates(0);
+        s_ac_state = AcState::Settling;
+        s_ac_deadline = millis() + k_ac_settle_ms;
+    } else {
+        serial_log("[wifi] scanning for saved networks...");
+        s_ac_state = AcState::Scanning;
+    }
     return true;
 }
 
 bool wifi_store_autoconnect_poll(void) {
-    if (s_ac_state == 0) {
+    switch (s_ac_state) {
+    case AcState::Idle:
         return false;
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-        s_ac_state = 0;
-        return false;
-    }
-    if ((int32_t)(millis() - s_ac_deadline) < 0) {
+
+    case AcState::Scanning: {
+        const int16_t n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_RUNNING && millis() - s_ac_scan_start < k_ac_scan_timeout_ms) {
+            return true;
+        }
+        serial_log("[wifi] scan done in %lu ms, %d AP(s)", (unsigned long)(millis() - s_ac_scan_start), (int)n);
+        build_candidates(n > 0 ? n : 0);
+        begin_candidate();
         return true;
     }
-    s_ac_i++;
-    if (s_ac_i >= s_known.size()) {
+
+    case AcState::Connecting:
+        if (WiFi.status() == WL_CONNECTED) {
+            s_ac_state = AcState::Idle;
+            return false;
+        }
+        if ((int32_t)(millis() - s_ac_deadline) < 0) {
+            return true;
+        }
+        serial_log("[wifi] no luck after %lu s", (unsigned long)(k_ac_timeout_ms / 1000));
         WiFi.disconnect(false);
-        s_ac_state = 0;
-        return false;
+        if (++s_ac_i >= s_ac_list.size()) {
+            s_ac_state = AcState::Idle;
+            return false;
+        }
+        s_ac_state = AcState::Settling;
+        s_ac_deadline = millis() + k_ac_settle_ms;
+        return true;
+
+    case AcState::Settling:
+        if ((int32_t)(millis() - s_ac_deadline) < 0) {
+            return true;
+        }
+        begin_candidate();
+        return true;
     }
-    WiFi.disconnect(false);
-    delay(100);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(s_known[s_ac_i].first.c_str(), s_known[s_ac_i].second.c_str());
-    s_ac_deadline = millis() + k_ac_timeout_ms;
-    return true;
+    return false;
 }
 
 bool wifi_store_autoconnect_active(void) {
-    return s_ac_state != 0;
+    return s_ac_state != AcState::Idle;
 }

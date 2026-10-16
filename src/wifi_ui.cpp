@@ -476,7 +476,7 @@ static void wifi_event_log(arduino_event_id_t event, arduino_event_info_t info) 
         serial_log("[wifi] STA stopped");
         break;
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-        serial_log("[wifi] associated with AP (channel %d)", (int)info.wifi_sta_connected.channel);
+        serial_log("[wifi] associated with AP (channel %d, RSSI %d dBm)", (int)info.wifi_sta_connected.channel, (int)WiFi.RSSI());
         break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
         serial_log("[wifi] disconnected, reason %d (%s)", (int)info.wifi_sta_disconnected.reason,
@@ -496,7 +496,9 @@ void wifi_ui_init(void) {
     WiFi.persistent(false);
     /* Radio stays on from here; reconnect paths use disconnect(false) so it is never stopped/restarted. */
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(true);
+    /* No modem power-save: dozing between beacons can miss the AP's auth replies (AUTH_EXPIRE,
+     * slow joins). USB powered with the screen on, so the extra current does not matter. */
+    WiFi.setSleep(false);
 
     /* Own screen (opened from the home screen); built now so status updates land even while hidden. */
     s_wifi_scr = lv_obj_create(nullptr);
