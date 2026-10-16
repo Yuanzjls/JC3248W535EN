@@ -3,11 +3,14 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <lvgl.h>
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "clock_ui.h"
 #include "status_bar.h"
+#include "sysmon.h"
 #include "ui_font.h"
 #include "ui_theme.h"
 
@@ -40,6 +43,14 @@ static lv_obj_t *s_tz_dd = nullptr;
 static lv_obj_t *s_units_bm = nullptr;
 static lv_obj_t *s_clock_bm = nullptr;
 static lv_obj_t *s_about = nullptr;
+
+/* Live System card: one bar per meter, refreshed every second while Settings is visible. */
+struct Meter {
+    lv_obj_t *bar;
+    lv_obj_t *value;
+};
+static Meter s_cpu0, s_cpu1, s_ram, s_psram;
+static lv_obj_t *s_top_tasks = nullptr;
 
 /* ---------- callbacks ---------- */
 
@@ -129,11 +140,78 @@ static void sync_from_state(void) {
     } else {
         about += "not connected";
     }
-    about += "\nMemory  " + String(ESP.getFreeHeap() / 1024) + " KB heap, " +
-             String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024) + " KB PSRAM free";
     about += "\nUptime  " + String(millis() / 60000UL) + " min";
     about += "\nBuild  " __DATE__ " " __TIME__;
     lv_label_set_text(s_about, about.c_str());
+}
+
+/** Bar colour by load: green, amber above 70 %, red above 90 %. */
+static void set_meter(Meter &m, float pct, const char *value) {
+    lv_bar_set_value(m.bar, (int32_t)lroundf(pct), LV_ANIM_OFF);
+    const lv_palette_t p = pct > 90 ? LV_PALETTE_RED : pct > 70 ? LV_PALETTE_AMBER : LV_PALETTE_GREEN;
+    lv_obj_set_style_bg_color(m.bar, lv_palette_main(p), LV_PART_INDICATOR);
+    lv_label_set_text(m.value, value);
+}
+
+static void update_system_card(void) {
+    const SysStats &st = sysmon_get();
+    if (!st.valid) {
+        return;
+    }
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%.0f%%", st.cpu[0]);
+    set_meter(s_cpu0, st.cpu[0], buf);
+    snprintf(buf, sizeof(buf), "%.0f%%", st.cpu[1]);
+    set_meter(s_cpu1, st.cpu[1], buf);
+
+    const uint32_t ram_used = st.heap_total - st.heap_free;
+    snprintf(buf, sizeof(buf), "%lu / %lu KB", (unsigned long)(ram_used / 1024), (unsigned long)(st.heap_total / 1024));
+    set_meter(s_ram, 100.0f * ram_used / st.heap_total, buf);
+
+    const uint32_t ps_used = st.psram_total - st.psram_free;
+    snprintf(buf, sizeof(buf), "%lu / %lu KB", (unsigned long)(ps_used / 1024), (unsigned long)(st.psram_total / 1024));
+    set_meter(s_psram, st.psram_total ? 100.0f * ps_used / st.psram_total : 0, buf);
+
+    lv_label_set_text_fmt(s_top_tasks, "Busiest: %s\nRAM low point %lu KB free, largest block %lu KB", st.top,
+                          (unsigned long)(st.heap_min / 1024), (unsigned long)(st.heap_largest / 1024));
+}
+
+static void system_timer_cb(lv_timer_t *t) {
+    LV_UNUSED(t);
+    if (lv_scr_act() == s_scr) {
+        update_system_card();
+    }
+}
+
+/** One meter row: name | bar | value. */
+static Meter add_meter(lv_obj_t *card, const char *name) {
+    lv_obj_t *row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 10, 0);
+
+    lv_obj_t *l = lv_label_create(row);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(l, ui_color_text(), 0);
+    lv_obj_set_width(l, 64);
+    lv_label_set_text(l, name);
+
+    Meter m;
+    m.bar = lv_bar_create(row);
+    lv_bar_set_range(m.bar, 0, 100);
+    lv_obj_set_height(m.bar, 10);
+    lv_obj_set_flex_grow(m.bar, 1);
+    lv_obj_set_style_bg_color(m.bar, ui_color_track(), LV_PART_MAIN);
+
+    m.value = lv_label_create(row);
+    lv_obj_set_style_text_font(m.value, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(m.value, ui_color_text_muted(), 0);
+    lv_obj_set_width(m.value, 110);
+    lv_obj_set_style_text_align(m.value, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_text(m.value, "--");
+    return m;
 }
 
 static void build_screen(void) {
@@ -201,6 +279,30 @@ static void build_screen(void) {
     static const char *k_clock_map[] = {"24-hour", "12-hour", ""};
     s_clock_bm = add_segmented(row, k_clock_map, s.clock_24h ? 0 : 1, clock_fmt_cb);
 
+    /* System: live CPU and memory */
+    lv_obj_t *sys = lv_obj_create(list);
+    ui_style_card(sys);
+    lv_obj_set_size(sys, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(sys, 10, 0);
+    lv_obj_set_style_pad_row(sys, 8, 0);
+    lv_obj_set_flex_flow(sys, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(sys, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *sys_title = lv_label_create(sys);
+    lv_obj_set_style_text_font(sys_title, ui_font_get(), 0);
+    lv_obj_set_style_text_color(sys_title, ui_color_text(), 0);
+    lv_label_set_text(sys_title, "System");
+    s_cpu0 = add_meter(sys, "Core 0");
+    s_cpu1 = add_meter(sys, "Core 1");
+    s_ram = add_meter(sys, "RAM");
+    s_psram = add_meter(sys, "PSRAM");
+    s_top_tasks = lv_label_create(sys);
+    lv_obj_set_width(s_top_tasks, LV_PCT(100));
+    lv_label_set_long_mode(s_top_tasks, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_top_tasks, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_top_tasks, ui_color_text_muted(), 0);
+    lv_label_set_text(s_top_tasks, "Measuring...");
+    (void)lv_timer_create(system_timer_cb, 1000, nullptr);
+
     /* About */
     lv_obj_t *about = lv_obj_create(list);
     ui_style_card(about);
@@ -218,5 +320,6 @@ static void build_screen(void) {
 void settings_ui_open(void) {
     build_screen();
     sync_from_state();
+    update_system_card();
     lv_scr_load(s_scr);
 }

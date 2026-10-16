@@ -382,7 +382,13 @@ static void lvgl_port_task(void *arg)
             task_delay_ms = lv_timer_handler();
             lvgl_port_unlock();
         }
-        if ((task_delay_ms > lvgl_port_ctx.task_max_sleep_ms) || (1 == task_delay_ms)) {
+        /*
+         * lv_timer_handler() returns the ms until the next timer is due. The original port also
+         * mapped a return of 1 to task_max_sleep_ms (500 ms), so whenever a redraw finished 1 ms
+         * before the next timer, the UI (touch included) froze for half a second. Only clamp the
+         * long "nothing scheduled" values.
+         */
+        if (task_delay_ms > lvgl_port_ctx.task_max_sleep_ms) {
             task_delay_ms = lvgl_port_ctx.task_max_sleep_ms;
         } else if (task_delay_ms < 1) {
             task_delay_ms = 1;

@@ -12,6 +12,7 @@
 #include "home_ui.h"
 #include "weather.h"
 #include "settings.h"
+#include "sysmon.h"
 
 
 
@@ -49,6 +50,36 @@ static const char *reset_reason_str(esp_reset_reason_t r)
 
 static uint32_t s_boot_t0;
 
+/*
+ * Redraw statistics (LVGL monitor callback, runs on the LVGL task). Every redraw is a full frame
+ * on this panel, so this shows what an animated screen costs. Logged every 5 s, only when busy
+ * (>= 5 redraws/s or a redraw over 100 ms), to keep idle logs quiet.
+ */
+static uint32_t s_rf_count, s_rf_total_ms, s_rf_max_ms, s_rf_window_start;
+
+static void disp_monitor_cb(lv_disp_drv_t *drv, uint32_t time_ms, uint32_t px)
+{
+  LV_UNUSED(drv);
+  LV_UNUSED(px);
+  s_rf_count++;
+  s_rf_total_ms += time_ms;
+  if (time_ms > s_rf_max_ms) {
+    s_rf_max_ms = time_ms;
+  }
+  const uint32_t now = millis();
+  const uint32_t window = now - s_rf_window_start;
+  if (window < 5000) {
+    return;
+  }
+  if (s_rf_count >= 25 || s_rf_max_ms >= 100) {
+    serial_log("[perf] %lu redraws in %lu ms (%.1f fps), avg %lu ms, max %lu ms", (unsigned long)s_rf_count,
+               (unsigned long)window, s_rf_count * 1000.0f / window, (unsigned long)(s_rf_total_ms / s_rf_count),
+               (unsigned long)s_rf_max_ms);
+  }
+  s_rf_count = s_rf_total_ms = s_rf_max_ms = 0;
+  s_rf_window_start = now;
+}
+
 /** Run one boot step and log how long it took, so a slow start can be pinned to a step. */
 #define BOOT_STEP(name, expr)                                                                    \
   do {                                                                                           \
@@ -85,8 +116,16 @@ void setup()
   };
   /* Default 4096 is too small for WiFi list + flex layout + CJK fonts (stack canary crash). */
   cfg.lvgl_port_cfg.task_stack = 16384;
+  /*
+   * Pin LVGL to core 0. The panel needs full-frame refreshes, so an animated screen keeps the LVGL
+   * task (priority 4) busy; unpinned, it also took core 1 and starved Arduino loop() (priority 1),
+   * which showed up as "[loop] SLOW: ... blocked" and delayed WiFi handling. WiFi's own tasks on
+   * core 0 have far higher priority, so they are unaffected.
+   */
+  cfg.lvgl_port_cfg.task_affinity = 0;
 
   BOOT_STEP("display start", bsp_display_start_with_config(&cfg));
+  lv_disp_get_default()->driver->monitor_cb = disp_monitor_cb;
   BOOT_STEP("backlight on", bsp_display_brightness_set(settings_get().brightness));
 
   /* Lock the mutex due to the LVGL APIs are not thread-safe */
@@ -95,6 +134,7 @@ void setup()
   BOOT_STEP("font load from SD", (void)ui_font_load_from_sd());
   BOOT_STEP("wifi_ui_init", wifi_ui_init());
   BOOT_STEP("home_ui_init", home_ui_init()); /* default screen: app launcher */
+  sysmon_begin(); /* CPU + memory sampling, [sys] log every 60 s */
 
   bsp_display_unlock();
 
@@ -132,5 +172,13 @@ void loop()
 
   LOOP_STEP("wifi_ui_loop", wifi_ui_loop());
   LOOP_STEP("clock_ui_loop", clock_ui_loop());
+
   s_last_loop_ms = millis();
+
+  /*
+   * The Arduino core calls loop() back-to-back with no pause, so without this it spins at 100 % of
+   * core 1 doing nothing (core 1's idle task never runs). Everything polled here (WiFi status, scan
+   * results, NTP) changes on a ~100 ms scale, so 5 ms of sleep costs no responsiveness.
+   */
+  delay(5);
 }

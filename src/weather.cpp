@@ -255,8 +255,9 @@ void weather_begin(void) {
     if (s_task) {
         return;
     }
-    /* 10 KB: HTTPClient + JSON parsing; low priority so it never competes with LVGL. */
-    xTaskCreatePinnedToCore(weather_task, "weather", 10240, nullptr, 1, &s_task, 0);
+    /* 10 KB: HTTPClient + JSON parsing; low priority so it never competes with the UI. */
+    /* Core 1 (with Arduino loop): core 0 is busy with LVGL redraws and the WiFi stack. */
+    xTaskCreatePinnedToCore(weather_task, "weather", 10240, nullptr, 1, &s_task, 1);
 }
 
 void weather_refresh(void) {
