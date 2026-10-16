@@ -7,6 +7,9 @@
 
 #include "esp_bsp.h"
 #include "ui_font.h"
+#include "clock_ui.h"
+#include "home_ui.h"
+#include "serial_log.h"
 #include "wifi_store.h"
 
 #ifndef WIFI_SCAN_RUNNING
@@ -27,6 +30,7 @@ static volatile bool s_scan_requested = false;
 static volatile bool s_scan_busy = false;
 static bool s_waiting_scan_complete = false;
 
+static lv_obj_t *s_wifi_scr = nullptr;
 static lv_obj_t *s_status_lbl = nullptr;
 static lv_obj_t *s_list = nullptr;
 static lv_obj_t *s_scan_btn = nullptr;
@@ -301,10 +305,10 @@ static void scan_btn_cb(lv_event_t *e) {
 }
 
 /** Collect APs after async scan completes (ssid is proper UTF-8 from driver). */
-static void collect_and_sort(int n) {
-    s_results.clear();
+static std::vector<ScanResult> collect_and_sort(int n) {
+    std::vector<ScanResult> out;
     if (n <= 0) {
-        return;
+        return out;
     }
     for (int i = 0; i < n; i++) {
         ScanResult r;
@@ -315,30 +319,41 @@ static void collect_and_sort(int n) {
         r.rssi = WiFi.RSSI(i);
         r.enc_type = WiFi.encryptionType(i);
         (void)r.enc_type;
-        s_results.push_back(r);
+        out.push_back(r);
     }
-    std::sort(s_results.begin(), s_results.end(), [](const ScanResult &a, const ScanResult &b) {
+    std::sort(out.begin(), out.end(), [](const ScanResult &a, const ScanResult &b) {
         return a.rssi > b.rssi;
     });
     /* Cap rows: huge lists + flex layout deep recursion can overflow the LVGL task stack. */
     static const size_t kMaxApRows = 32;
-    if (s_results.size() > kMaxApRows) {
-        s_results.resize(kMaxApRows);
+    if (out.size() > kMaxApRows) {
+        out.resize(kMaxApRows);
     }
+    return out;
+}
+
+/**
+ * Publish scan results and schedule the list rebuild. Runs on the Arduino loop task, so it must
+ * hold the LVGL lock: s_results is read by LVGL callbacks and lv_async_call touches LVGL timers.
+ */
+static void publish_results(std::vector<ScanResult> &&results) {
+    bsp_display_lock(0);
+    s_results = std::move(results);
+    lv_async_call(rebuild_list_cb, nullptr);
+    bsp_display_unlock();
 }
 
 /** Start non-blocking scan - avoids task WDT reset from multi-second blocking scan. */
 static void start_async_scan(void) {
     s_scan_busy = true;
     s_waiting_scan_complete = false;
-    s_results.clear();
 
     WiFi.mode(WIFI_STA);
     int16_t r = WiFi.scanNetworks(true, true, false, 120);
 
     if (r == WIFI_SCAN_FAILED) {
         s_scan_busy = false;
-        lv_async_call(rebuild_list_cb, nullptr);
+        publish_results({});
         return;
     }
     if (r == WIFI_SCAN_RUNNING) {
@@ -346,9 +361,9 @@ static void start_async_scan(void) {
         return;
     }
     /* Unusual: count returned immediately */
-    collect_and_sort(r);
+    std::vector<ScanResult> results = collect_and_sort(r);
     s_scan_busy = false;
-    lv_async_call(rebuild_list_cb, nullptr);
+    publish_results(std::move(results));
 }
 
 /** Poll async scan; call from loop() every iteration. */
@@ -367,13 +382,11 @@ static void poll_async_scan(void) {
     s_scan_busy = false;
 
     if (c == WIFI_SCAN_FAILED) {
-        s_results.clear();
-        lv_async_call(rebuild_list_cb, nullptr);
+        publish_results({});
         return;
     }
 
-    collect_and_sort(c);
-    lv_async_call(rebuild_list_cb, nullptr);
+    publish_results(collect_and_sort(c));
 }
 
 static void poll_connection(void) {
@@ -387,18 +400,19 @@ static void poll_connection(void) {
                 s_conn = ConnState::Connected;
                 wifi_store_promote(WiFi.SSID());
                 String msg = String("Connected: ") + WiFi.SSID() + "\nIP " + WiFi.localIP().toString();
-                bsp_display_lock(10);
+                bsp_display_lock(0);
                 set_status_string(msg);
                 if (s_status_lbl) {
                     lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
                 }
                 bsp_display_unlock();
                 s_connect_start_ms = 0;
+                clock_ui_on_wifi_connected();
                 return;
             }
             if (!wifi_store_autoconnect_active()) {
                 s_conn = ConnState::Failed;
-                bsp_display_lock(10);
+                bsp_display_lock(0);
                 set_status_text("Saved WiFi failed - tap Scan");
                 if (s_status_lbl) {
                     lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
@@ -416,18 +430,19 @@ static void poll_connection(void) {
                 s_connect_from_manual = false;
             }
             String msg = String("Connected: ") + WiFi.SSID() + "\nIP " + WiFi.localIP().toString();
-            bsp_display_lock(10);
+            bsp_display_lock(0);
             set_status_string(msg);
             if (s_status_lbl) {
                 lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
             }
             bsp_display_unlock();
             s_connect_start_ms = 0;
+            clock_ui_on_wifi_connected();
             return;
         }
         if (millis() - s_connect_start_ms > 20000) {
             s_conn = ConnState::Failed;
-            bsp_display_lock(10);
+            bsp_display_lock(0);
             set_status_text("Connection failed / timeout");
             if (s_status_lbl) {
                 lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
@@ -440,7 +455,8 @@ static void poll_connection(void) {
 
     if (s_conn == ConnState::Connected && st != WL_CONNECTED) {
         s_conn = ConnState::Idle;
-        bsp_display_lock(10);
+        clock_ui_on_wifi_lost();
+        bsp_display_lock(0);
         set_status_text("WiFi lost - tap Scan");
         if (s_status_lbl) {
             lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
@@ -449,18 +465,57 @@ static void poll_connection(void) {
     }
 }
 
+/** Log WiFi driver events (runs on the WiFi event task) so connect failures show their cause. */
+static void wifi_event_log(arduino_event_id_t event, arduino_event_info_t info) {
+    switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START:
+        serial_log("[wifi] STA started");
+        break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+        serial_log("[wifi] STA stopped");
+        break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        serial_log("[wifi] associated with AP (channel %d)", (int)info.wifi_sta_connected.channel);
+        break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        serial_log("[wifi] disconnected, reason %d (%s)", (int)info.wifi_sta_disconnected.reason,
+                   WiFi.disconnectReasonName((wifi_err_reason_t)info.wifi_sta_disconnected.reason));
+        break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        serial_log("[wifi] got IP %s", WiFi.localIP().toString().c_str());
+        break;
+    default:
+        break;
+    }
+}
+
 void wifi_ui_init(void) {
+    WiFi.onEvent(wifi_event_log);
+    /* Credentials live on SD (wifi_store); stop the core also copying them into internal flash. */
+    WiFi.persistent(false);
+    /* Radio stays on from here; reconnect paths use disconnect(false) so it is never stopped/restarted. */
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(true);
 
-    lv_obj_t *root = lv_obj_create(lv_scr_act());
+    /* Own screen (opened from the home screen); built now so status updates land even while hidden. */
+    s_wifi_scr = lv_obj_create(nullptr);
+
+    lv_obj_t *root = lv_obj_create(s_wifi_scr);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_pad_all(root, 8, 0);
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = lv_label_create(root);
+    lv_obj_t *header = lv_obj_create(root);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(header, 10, 0);
+    (void)home_ui_add_home_button(header);
+
+    lv_obj_t *title = lv_label_create(header);
     lv_label_set_text(title, "WiFi setup");
     lv_obj_set_style_text_font(title, ui_font_get(), 0);
 
@@ -484,6 +539,12 @@ void wifi_ui_init(void) {
     lv_obj_add_event_cb(s_scan_btn, scan_btn_cb, LV_EVENT_CLICKED, nullptr);
 }
 
+void wifi_ui_open(void) {
+    if (s_wifi_scr) {
+        lv_scr_load(s_wifi_scr);
+    }
+}
+
 void wifi_ui_loop(void) {
     if (!s_wifi_auto_started) {
         s_wifi_auto_started = true;
@@ -500,30 +561,33 @@ void wifi_ui_loop(void) {
     }
 
     if (s_pending_connect) {
+        /* s_pending_* are written by LVGL event callbacks; copy them while holding the LVGL lock. */
+        bsp_display_lock(0);
         s_pending_connect = false;
-
         s_attempt_ssid = s_pending_ssid;
         s_attempt_password = s_pending_password;
+        s_pending_password = "";
+        bsp_display_unlock();
         s_connect_from_manual = true;
 
-        WiFi.disconnect(true);
-        delay(100);
-        WiFi.mode(WIFI_STA);
+        /* Drop the current association only. disconnect(true) turns the radio off, and restarting it right
+         * away races the async STA_STOP event, leaving the driver "not started" (connect silently fails). */
+        WiFi.disconnect(false);
 
-        if (s_pending_ssid.length() == 0) {
+        if (s_attempt_ssid.length() == 0) {
             s_conn = ConnState::Failed;
             s_connect_from_manual = false;
+            bsp_display_lock(0);
             set_status_text("Invalid SSID");
-            s_pending_password = "";
+            bsp_display_unlock();
             return;
         }
 
-        if (s_pending_password.length() > 0) {
-            WiFi.begin(s_pending_ssid.c_str(), s_pending_password.c_str());
+        if (s_attempt_password.length() > 0) {
+            WiFi.begin(s_attempt_ssid.c_str(), s_attempt_password.c_str());
         } else {
-            WiFi.begin(s_pending_ssid.c_str());
+            WiFi.begin(s_attempt_ssid.c_str());
         }
-        s_pending_password = "";
         s_conn = ConnState::Connecting;
         s_connect_start_ms = millis();
     }

@@ -13,9 +13,11 @@ extern "C" void serial_log_init(void) {
 
 extern "C" void serial_log(const char *fmt, ...) {
     char buf[256];
+    /* Millisecond timestamp prefix: gaps between lines show where boot / loop time goes. */
+    const int pre = snprintf(buf, sizeof(buf), "[%7lu] ", (unsigned long)millis());
     va_list ap;
     va_start(ap, fmt);
-    (void)vsnprintf(buf, sizeof(buf), fmt, ap);
+    (void)vsnprintf(buf + pre, sizeof(buf) - pre, fmt, ap);
     va_end(ap);
     buf[sizeof(buf) - 1] = '\0';
 

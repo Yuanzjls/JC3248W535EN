@@ -77,10 +77,12 @@ static void load_from_sd(void) {
     s_known.clear();
     File f = SD.open(k_file, FILE_READ);
     if (!f) {
+        serial_log("[wifi_store] %s not found on SD", k_file);
         return;
     }
     String line;
     if (!read_line_trim(f, line) || line != k_magic) {
+        serial_log("[wifi_store] %s bad header", k_file);
         f.close();
         return;
     }
@@ -118,6 +120,7 @@ static bool write_to_sd(void) {
         f.println(hex_encode_bytes(p.second));
     }
     f.close();
+    serial_log("[wifi_store] saved %u network(s) to %s", (unsigned)s_known.size(), k_file);
     return true;
 }
 
@@ -126,6 +129,7 @@ void wifi_store_begin(void) {
         return;
     }
     load_from_sd();
+    serial_log("[wifi_store] loaded %u network(s) from %s", (unsigned)s_known.size(), k_file);
     s_loaded = true;
 }
 
@@ -202,7 +206,9 @@ bool wifi_store_autoconnect_start(void) {
     }
     s_ac_state = 1;
     s_ac_i = 0;
-    WiFi.disconnect(true);
+    /* disconnect(false): keep the radio on. disconnect(true) stops WiFi, and restarting it right away
+     * races the async STA_STOP event, leaving the driver "not started" so connect silently fails. */
+    WiFi.disconnect(false);
     delay(100);
     WiFi.mode(WIFI_STA);
     WiFi.begin(s_known[0].first.c_str(), s_known[0].second.c_str());
@@ -223,11 +229,11 @@ bool wifi_store_autoconnect_poll(void) {
     }
     s_ac_i++;
     if (s_ac_i >= s_known.size()) {
-        WiFi.disconnect(true);
+        WiFi.disconnect(false);
         s_ac_state = 0;
         return false;
     }
-    WiFi.disconnect(true);
+    WiFi.disconnect(false);
     delay(100);
     WiFi.mode(WIFI_STA);
     WiFi.begin(s_known[s_ac_i].first.c_str(), s_known[s_ac_i].second.c_str());
