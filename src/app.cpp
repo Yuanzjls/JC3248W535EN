@@ -11,6 +11,7 @@
 #include "wifi_ui.h"
 #include "home_ui.h"
 #include "weather.h"
+#include "settings.h"
 
 
 
@@ -66,6 +67,7 @@ void setup()
   BOOT_STEP("SD mount", (void)ui_font_mount_sd());
   BOOT_STEP("wifi_store_begin (read SD)", wifi_store_begin());
   BOOT_STEP("clock_ui_init (read TZ)", clock_ui_init());
+  BOOT_STEP("settings_load (read SD)", settings_load());
 
   size_t freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   bsp_display_cfg_t cfg = {
@@ -85,7 +87,7 @@ void setup()
   cfg.lvgl_port_cfg.task_stack = 16384;
 
   BOOT_STEP("display start", bsp_display_start_with_config(&cfg));
-  BOOT_STEP("backlight on", bsp_display_backlight_on());
+  BOOT_STEP("backlight on", bsp_display_brightness_set(settings_get().brightness));
 
   /* Lock the mutex due to the LVGL APIs are not thread-safe */
   BOOT_STEP("LVGL lock", bsp_display_lock(0));

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "home_ui.h"
+#include "status_bar.h"
 #include "serial_log.h"
 #include "ui_font.h"
 #include "ui_theme.h"
@@ -22,7 +22,7 @@ static WeatherData s_data;
 static char s_tile_text[12] = "--\xC2\xB0";
 
 static lv_obj_t *s_scr = nullptr;
-static lv_obj_t *s_title = nullptr;
+static lv_obj_t *s_bar = nullptr;
 static lv_obj_t *s_icon = nullptr;
 static lv_obj_t *s_temp = nullptr;
 static lv_obj_t *s_cond = nullptr;
@@ -205,7 +205,7 @@ static void update_screen(void) {
     const WeatherData &wd = s_data;
     char t[16], hi[16], lo[16];
 
-    lv_label_set_text(s_title, wd.location);
+    status_bar_set_title(s_bar, wd.location);
     draw_icon(s_icon, k_main_icon, wd.code, wd.is_day);
     fmt_temp(t, sizeof(t), wd.temp);
     lv_label_set_text_fmt(s_temp, "%s%s", t, wd.fahrenheit ? "F" : "C");
@@ -312,18 +312,9 @@ static void build_screen(void) {
     lv_obj_set_flex_flow(s_scr, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Header: home | location | refresh */
-    lv_obj_t *header = make_row(s_scr);
-    lv_obj_set_style_pad_column(header, 10, 0);
-    (void)home_ui_add_home_button(header);
-    s_title = make_label(header, ui_font_get(), ui_color_text(), "Weather");
-    lv_obj_set_flex_grow(s_title, 1);
-    lv_label_set_long_mode(s_title, LV_LABEL_LONG_DOT);
-    lv_obj_t *refresh = lv_btn_create(header);
-    lv_obj_set_size(refresh, 44, 36);
-    lv_obj_t *rl = make_label(refresh, &lv_font_montserrat_20, lv_color_white(), LV_SYMBOL_REFRESH);
-    lv_obj_center(rl);
-    lv_obj_add_event_cb(refresh, refresh_btn_cb, LV_EVENT_CLICKED, nullptr);
+    /* Shared status bar: title is the location; refresh lives in the bar */
+    s_bar = status_bar_create(s_scr, "Weather", true);
+    (void)status_bar_add_action(s_bar, LV_SYMBOL_REFRESH, refresh_btn_cb, nullptr);
 
     /* Current conditions: icon | temp + condition | details */
     lv_obj_t *main = make_row(s_scr);
@@ -355,33 +346,7 @@ static void build_screen(void) {
     lv_btnmatrix_set_btn_ctrl(bm, s_mode == FcMode::Hourly ? 0 : 1, LV_BTNMATRIX_CTRL_CHECKED);
     lv_obj_set_size(bm, 180, 34);
 
-    /* Segmented control: grey pill track, selected option is a white pill with dark text. */
-    lv_obj_set_style_bg_color(bm, ui_color_track(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bm, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bm, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(bm, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bm, 3, LV_PART_MAIN);
-    lv_obj_set_style_pad_gap(bm, 3, LV_PART_MAIN);
-
-    lv_obj_set_style_text_font(bm, &lv_font_montserrat_14, LV_PART_ITEMS);
-    lv_obj_set_style_text_color(bm, ui_color_text_muted(), LV_PART_ITEMS);
-    lv_obj_set_style_bg_opa(bm, LV_OPA_TRANSP, LV_PART_ITEMS);
-    lv_obj_set_style_border_width(bm, 0, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_width(bm, 0, LV_PART_ITEMS);
-    lv_obj_set_style_radius(bm, LV_RADIUS_CIRCLE, LV_PART_ITEMS);
-
-    lv_obj_set_style_bg_opa(bm, LV_OPA_COVER, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(bm, ui_color_surface(), LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(bm, ui_color_text(), LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_shadow_width(bm, 6, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_shadow_opa(bm, LV_OPA_20, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_shadow_ofs_y(bm, 1, LV_PART_ITEMS | LV_STATE_CHECKED);
-
-    /* Light press feedback on either option; no focus outline from touch. */
-    lv_obj_set_style_bg_opa(bm, LV_OPA_50, LV_PART_ITEMS | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(bm, ui_color_surface(), LV_PART_ITEMS | LV_STATE_PRESSED);
-    lv_obj_set_style_outline_width(bm, 0, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(bm, 0, LV_PART_MAIN | LV_STATE_FOCUSED);
+    ui_style_segmented(bm);
     lv_obj_add_event_cb(bm, mode_btns_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 
     s_status = make_label(tabs, &lv_font_montserrat_12, ui_color_text_muted(), "");

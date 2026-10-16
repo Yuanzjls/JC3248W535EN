@@ -1,0 +1,29 @@
+#pragma once
+
+#include <stddef.h>
+#include <time.h>
+
+enum class TempUnits : int { Auto = 0, Celsius = 1, Fahrenheit = 2 };
+
+struct AppSettings {
+    int brightness;  /* backlight %, 10..100 */
+    TempUnits units; /* Auto = from /weather.ini or IP country */
+    bool clock_24h;
+};
+
+/** Read /settings.ini from SD (defaults if missing). Call after the SD card is mounted. */
+void settings_load(void);
+
+const AppSettings &settings_get(void);
+
+/** Apply backlight now; save=true also writes /settings.ini (use false while dragging a slider). */
+void settings_set_brightness(int percent, bool save);
+/** Saves and triggers a weather re-fetch in the new units. */
+void settings_set_units(TempUnits units);
+void settings_set_clock_24h(bool on);
+
+/** "14:05", or in 12h mode "2:05 PM" (with_ampm) / "2:05" (without). */
+void settings_format_hm(char *buf, size_t n, const struct tm *ti, bool with_ampm);
+
+/** Show the Settings app (LVGL context / under bsp_display_lock). */
+void settings_ui_open(void);

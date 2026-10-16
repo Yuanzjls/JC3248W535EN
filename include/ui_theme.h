@@ -13,3 +13,9 @@ static inline lv_color_t ui_color_text_muted(void) { return lv_color_hex(0x5F6B7
 static inline lv_color_t ui_color_tick(void) { return lv_color_hex(0x9AA4B0); }       /* clock minor ticks */
 static inline lv_color_t ui_color_surface(void) { return lv_color_white(); }          /* cards, selected pill */
 static inline lv_color_t ui_color_track(void) { return lv_color_hex(0xE2E6EB); }      /* segmented-control track */
+
+/** Style a checkable one-of-N lv_btnmatrix as a pill segmented control (grey track, white selected pill). */
+void ui_style_segmented(lv_obj_t *bm);
+
+/** White rounded card used for grouped content (settings rows, forecast cards). */
+void ui_style_card(lv_obj_t *card);

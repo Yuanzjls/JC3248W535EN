@@ -9,6 +9,7 @@
 #include "ui_font.h"
 #include "clock_ui.h"
 #include "home_ui.h"
+#include "status_bar.h"
 #include "serial_log.h"
 #include "wifi_store.h"
 
@@ -507,17 +508,7 @@ void wifi_ui_init(void) {
     lv_obj_set_flex_align(root, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *header = lv_obj_create(root);
-    lv_obj_remove_style_all(header);
-    lv_obj_set_size(header, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(header, 10, 0);
-    (void)home_ui_add_home_button(header);
-
-    lv_obj_t *title = lv_label_create(header);
-    lv_label_set_text(title, "WiFi setup");
-    lv_obj_set_style_text_font(title, ui_font_get(), 0);
+    (void)status_bar_create(root, "WiFi setup", true);
 
     s_status_lbl = lv_label_create(root);
     lv_label_set_long_mode(s_status_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);

@@ -7,6 +7,7 @@
 
 #include "esp_bsp.h"
 #include "serial_log.h"
+#include "settings.h"
 #include "weather_ui.h"
 
 /*
@@ -139,7 +140,9 @@ static bool geolocate(void) {
 }
 
 static bool fetch_forecast(WeatherData *wd) {
-    const bool fahrenheit = s_cfg.units == 1;
+    /* Settings app choice wins; "Auto" falls back to /weather.ini or the IP country. */
+    const TempUnits pref = settings_get().units;
+    const bool fahrenheit = pref == TempUnits::Fahrenheit || (pref == TempUnits::Auto && s_cfg.units == 1);
     String url = "http://api.open-meteo.com/v1/forecast?latitude=" + String(s_cfg.lat, 4) +
                  "&longitude=" + String(s_cfg.lon, 4) +
                  "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"
