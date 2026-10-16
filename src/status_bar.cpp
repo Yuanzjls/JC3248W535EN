@@ -19,7 +19,7 @@ struct StatusBar {
     lv_obj_t *time;
 };
 
-static const int k_max_bars = 8;
+static const int k_max_bars = 16; /* one per screen */
 static StatusBar s_bars[k_max_bars];
 static int s_bar_count = 0;
 static lv_timer_t *s_timer = nullptr;

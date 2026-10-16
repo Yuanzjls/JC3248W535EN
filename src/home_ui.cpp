@@ -4,7 +4,9 @@
 #include <WiFi.h>
 #include <time.h>
 
+#include "breakout_ui.h"
 #include "clock_ui.h"
+#include "files_ui.h"
 #include "serial_log.h"
 #include "settings.h"
 #include "status_bar.h"
@@ -55,19 +57,24 @@ static void home_timer_cb(lv_timer_t *t) {
     lv_label_set_text(s_clock_tile_time, buf);
 }
 
+/* Home grid: 4 columns x 2 rows of 104 px cells (72 px tile + name) under the status bar. */
+static const lv_coord_t k_cell_w = 104;
+static const int k_grid_cols = 4;
+static const lv_coord_t k_grid_gap = 8;
+
 /** Rounded app tile: icon (large label) on top, app name below. Returns the icon label. */
 static lv_obj_t *add_app_tile(lv_obj_t *parent, const char *icon, const lv_font_t *icon_font, const char *name,
                               lv_color_t color, app_open_fn open) {
     lv_obj_t *col = lv_obj_create(parent);
     lv_obj_remove_style_all(col);
-    lv_obj_set_size(col, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(col, k_cell_w, LV_SIZE_CONTENT); /* fixed cells keep a tidy grid */
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(col, 8, 0);
+    lv_obj_set_style_pad_row(col, 6, 0);
 
     lv_obj_t *tile = lv_btn_create(col);
-    lv_obj_set_size(tile, 96, 96);
-    lv_obj_set_style_radius(tile, 24, 0);
+    lv_obj_set_size(tile, 72, 72);
+    lv_obj_set_style_radius(tile, 20, 0);
     lv_obj_set_style_bg_color(tile, color, 0);
     lv_obj_set_style_shadow_width(tile, 0, 0);
     lv_obj_add_event_cb(tile, app_tile_cb, LV_EVENT_CLICKED, (void *)open);
@@ -102,19 +109,24 @@ void home_ui_init(void) {
     /* App grid */
     lv_obj_t *apps = lv_obj_create(s_home_scr);
     lv_obj_remove_style_all(apps);
-    lv_obj_set_size(apps, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_align(apps, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_set_size(apps, k_grid_cols * k_cell_w + (k_grid_cols - 1) * k_grid_gap, LV_SIZE_CONTENT);
+    lv_obj_align(apps, LV_ALIGN_CENTER, 0, 20);
     lv_obj_set_flex_flow(apps, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(apps, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(apps, 16, 0);
+    lv_obj_set_flex_align(apps, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(apps, k_grid_gap, 0);
+    lv_obj_set_style_pad_row(apps, 10, 0);
 
-    (void)add_app_tile(apps, LV_SYMBOL_WIFI, &lv_font_montserrat_40, "WiFi", lv_palette_main(LV_PALETTE_BLUE),
+    (void)add_app_tile(apps, LV_SYMBOL_WIFI, &lv_font_montserrat_30, "WiFi", lv_palette_main(LV_PALETTE_BLUE),
                        wifi_ui_open);
-    s_clock_tile_time = add_app_tile(apps, "--:--", &lv_font_montserrat_26, "Clock",
+    s_clock_tile_time = add_app_tile(apps, "--:--", &lv_font_montserrat_20, "Clock",
                                      lv_palette_darken(LV_PALETTE_DEEP_ORANGE, 1), clock_ui_open);
-    s_weather_tile_temp = add_app_tile(apps, weather_ui_tile_text(), &lv_font_montserrat_28, "Weather",
+    s_weather_tile_temp = add_app_tile(apps, weather_ui_tile_text(), &lv_font_montserrat_22, "Weather",
                                        lv_palette_main(LV_PALETTE_TEAL), weather_ui_open);
-    (void)add_app_tile(apps, LV_SYMBOL_SETTINGS, &lv_font_montserrat_40, "Settings",
+    (void)add_app_tile(apps, LV_SYMBOL_DIRECTORY, &lv_font_montserrat_30, "Files", lv_palette_main(LV_PALETTE_AMBER),
+                       files_ui_open);
+    (void)add_app_tile(apps, LV_SYMBOL_PLAY, &lv_font_montserrat_28, "Breakout",
+                       lv_palette_main(LV_PALETTE_DEEP_PURPLE), breakout_ui_open);
+    (void)add_app_tile(apps, LV_SYMBOL_SETTINGS, &lv_font_montserrat_30, "Settings",
                        lv_palette_main(LV_PALETTE_BLUE_GREY), settings_ui_open);
 
     (void)lv_timer_create(home_timer_cb, 1000, nullptr);
