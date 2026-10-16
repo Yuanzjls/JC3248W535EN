@@ -1,7 +1,39 @@
-.pio
-# Large source font for local regeneration (bin is committed under documentation/fonts/)
-tools/font_gen/*.otf
+# --- PlatformIO build output ---
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# --- VS Code (keep shared settings like extensions.json) ---
 .vscode/.browse.c_cpp.db*
 .vscode/c_cpp_properties.json
 .vscode/launch.json
-.vscode/ipch
+.vscode/ipch/
+.vscode/settings.json
+*.code-workspace
+
+# --- Fonts ---
+# Large source font for local regeneration (bin is committed under documentation/fonts/)
+tools/font_gen/*.otf
+tools/font_gen/*.ttf
+
+# --- SD card runtime files (contain WiFi passwords / per-device settings) ---
+# Never commit a copy of the card contents; weather.ini is user config and is fine to keep locally.
+wifi_known.txt
+timezone.ini
+/sd_card/
+
+# --- Python (scripts/, tools/) ---
+__pycache__/
+*.py[cod]
+.venv/
+
+# --- Logs and serial captures ---
+*.log
+monitor*.txt
+
+# --- OS / editor clutter ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
