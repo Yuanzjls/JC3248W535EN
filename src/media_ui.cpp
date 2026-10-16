@@ -12,11 +12,14 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <new>
 #include <strings.h>
 
 #include "esp_bsp.h"
+#include "lv_port.h"
 #include "serial_log.h"
+#include "ui_font.h"
 #include "ui_theme.h"
 
 /*
@@ -24,7 +27,7 @@
  *
  * Decoding runs in a "media" task on core 1 (core 0 is busy with LVGL redraws). Frames go into one
  * of two RGB565 buffers in PSRAM; the task decodes into the hidden one and then, under the LVGL
- * lock, points the lv_img at it. LVGL only reads a buffer while rendering under that same lock, so
+ * lock, shows it (stills: point the lv_img at it; video: see the MJPEG section). LVGL only reads a buffer while rendering under that same lock, so
  * the buffer being decoded into is never on screen: no tearing.
  *
  * Pixels are big-endian RGB565 because lv_conf.h has LV_COLOR_16_SWAP=1.
@@ -33,15 +36,15 @@
 static const int k_scr_w = 480;
 static const int k_scr_h = 320;
 static const size_t k_max_still_file = 12 * 1024 * 1024; /* bigger images are refused */
-static const size_t k_video_buf = 512 * 1024;            /* holds several MJPEG frames */
 static const int k_default_fps = 24;                     /* raw MJPEG has no timing; "_15fps" in the name overrides */
 static const uint32_t k_overlay_hide_ms = 3000;
 
 /* ---------- shared state ---------- */
 
-enum class Cmd { ShowImage, PlayVideo, TogglePause, Stop };
+enum class Cmd { ShowImage, PlayVideo, TogglePause, Seek, Stop };
 struct MediaCmd {
     Cmd cmd;
+    int arg; /* Seek: position in 1/1000 of the file */
     char path[256];
 };
 
@@ -64,8 +67,13 @@ static lv_obj_t *s_info = nullptr;
 static lv_obj_t *s_msg = nullptr;
 static lv_obj_t *s_prev_btn = nullptr;
 static lv_obj_t *s_next_btn = nullptr;
+static lv_obj_t *s_bottom = nullptr;   /* video controls: play | progress | time */
 static lv_obj_t *s_play_btn = nullptr;
 static lv_obj_t *s_play_lbl = nullptr;
+static lv_obj_t *s_seek_bar = nullptr;
+static lv_obj_t *s_time_lbl = nullptr;
+static volatile uint32_t s_total_s = 0; /* estimated length, for the drag preview */
+static volatile bool s_total_exact = false;
 static lv_obj_t *s_return_scr = nullptr;
 static lv_timer_t *s_hide_timer = nullptr;
 
@@ -180,8 +188,9 @@ static bool cmd_pending(void) {
 /* ---------- JPEG ---------- */
 
 struct JpegTarget {
-    uint16_t *buf;
-    int w, h; /* buffer size; blocks are clipped to it */
+    uint16_t *buf; /* top-left of the output area */
+    int stride;    /* pixels per buffer row (video: full screen width, letterboxed) */
+    int w, h;      /* output area; blocks are clipped to it */
 };
 
 static int jpeg_draw_cb(JPEGDRAW *d) {
@@ -193,7 +202,7 @@ static int jpeg_draw_cb(JPEGDRAW *d) {
             break;
         }
         if (w > 0) {
-            memcpy(t->buf + (size_t)y * t->w + d->x, d->pPixels + (size_t)r * d->iWidth, (size_t)w * 2);
+            memcpy(t->buf + (size_t)y * t->stride + d->x, d->pPixels + (size_t)r * d->iWidth, (size_t)w * 2);
         }
     }
     return 1;
@@ -232,7 +241,7 @@ static bool decode_jpeg_still(uint8_t *data, size_t len, char *info, size_t info
         return false;
     }
     memset(tmp, 0, (size_t)tw * th * 2); /* scaled output can be 1 px short of the rounded-up size */
-    JpegTarget t = {tmp, tw, th};
+    JpegTarget t = {tmp, tw, tw, th};
     s_jpeg->setPixelType(RGB565_BIG_ENDIAN);
     s_jpeg->setUserPointer(&t);
     const uint32_t t0 = millis();
@@ -456,31 +465,395 @@ static bool next_frame(const uint8_t *buf, size_t end, size_t *pos, size_t *f_st
     return false;
 }
 
-/** Play until a new command arrives (left in the queue for media_task). Loops at end of file. */
-static void play_video(const char *path) {
-    ui_message("Loading...");
-    File f = SD.open(path, FILE_READ);
+/*
+ * Playback is split in two so SD reads overlap decoding:
+ *   reader task (core 0): reads the file in 32 KB chunks, cuts out complete JPEG frames and copies
+ *     each into a free slot (k_slots of them) -> s_full_q.
+ *   media task (core 1): takes a slot, decodes it into the hidden frame buffer, hands the slot back
+ *     (s_free_q), then shows the frame.
+ * Showing: with the controls hidden, the frame is sent straight to the panel
+ * (lvgl_port_flush_frame), skipping LVGL's full-screen compose. With the controls visible it goes
+ * through LVGL (lv_img + invalidate) so the overlay is drawn on top. Frames are letterboxed into
+ * full-screen buffers, because the panel only takes full-frame updates.
+ */
+static const int k_slots = 4;
+static const size_t k_slot_size = 192 * 1024;  /* largest frame accepted */
+static const size_t k_stream_buf = 256 * 1024; /* read-ahead buffer (multiple frames) */
+static const size_t k_read_chunk = 32 * 1024;  /* small reads: no long stalls */
+static const uint8_t k_slot_end = 0xFF;        /* reader -> player: file has no frames */
+
+static uint8_t *s_slot_data[k_slots];
+static size_t s_slot_len[k_slots];
+static uint8_t *s_stream = nullptr;
+static QueueHandle_t s_free_q = nullptr;
+static QueueHandle_t s_full_q = nullptr;
+static TaskHandle_t s_reader = nullptr;
+static SemaphoreHandle_t s_reader_done = nullptr;
+static char s_reader_path[256];
+static volatile bool s_reader_stop = false;
+static volatile uint32_t s_read_bytes = 0; /* stats, reset by the player */
+static volatile uint32_t s_read_ms = 0;
+
+/* Seeking. Raw MJPEG has no index, so a seek jumps to a byte offset and resyncs on the next JPEG
+ * start marker (FFD8 can't occur inside entropy-coded data, so this is reliable). Every queued
+ * frame carries the seek generation it was read in; the player drops frames from older ones. */
+static volatile uint32_t s_file_size = 0;
+static volatile uint32_t s_seek_to = 0;
+static volatile uint32_t s_seek_gen = 0; /* bumped by the player per seek */
+static volatile bool s_seek_req = false;
+static uint32_t s_slot_off[k_slots];      /* file offset of each queued frame */
+static uint32_t s_slot_gen[k_slots];
+
+/*
+ * Frame index: the file offset of every frame. Raw MJPEG doesn't store a frame count, so the exact
+ * length needs a full scan. The reader does it in the background, one 32 KB chunk at a time, only
+ * while it is waiting for the player to free a slot (i.e. playback is ahead), so it never costs a
+ * frame. When complete, the length and seeking become exact, and the index is cached on SD
+ * (/.cache/mjpeg/<path>.idx, checked against the file size) so the next play has it at once.
+ */
+static const uint32_t k_index_max = 120000; /* ~83 min at 24 fps; 480 KB of PSRAM */
+static const char *k_index_dir = "/.cache/mjpeg";
+static const uint32_t k_index_magic = 0x31584A4D; /* "MJX1" */
+
+static uint32_t *s_index = nullptr;
+static volatile uint32_t s_index_count = 0;
+static volatile bool s_index_done = false; /* s_index[0 .. count) complete and exact */
+static File s_scan_f;
+static uint8_t *s_scan_buf = nullptr;
+static uint32_t s_scan_off = 0;
+static bool s_scan_prev_ff = false;
+static bool s_scan_active = false;
+static uint32_t s_scan_t0 = 0;
+
+/** "/mjpeg/clip.mjpeg" -> "/.cache/mjpeg/mjpeg_clip.mjpeg.idx" */
+static String index_cache_path(const char *video) {
+    String p = String(k_index_dir) + "/";
+    for (const char *c = video[0] == '/' ? video + 1 : video; *c; c++) {
+        p += (*c == '/') ? '_' : *c;
+    }
+    return p + ".idx";
+}
+
+static bool index_load(const char *video, uint32_t file_size) {
+    File f = SD.open(index_cache_path(video), FILE_READ);
     if (!f) {
-        ui_message("Cannot open file");
+        return false;
+    }
+    uint32_t hdr[3] = {0, 0, 0};
+    bool ok = f.read((uint8_t *)hdr, sizeof(hdr)) == sizeof(hdr) && hdr[0] == k_index_magic &&
+              hdr[1] == file_size && hdr[2] > 0 && hdr[2] <= k_index_max &&
+              f.read((uint8_t *)s_index, hdr[2] * 4) == hdr[2] * 4;
+    f.close();
+    if (ok) {
+        s_index_count = hdr[2];
+        s_index_done = true;
+        serial_log("[media] index from cache: %lu frames", (unsigned long)hdr[2]);
+    }
+    return ok;
+}
+
+static void index_save(const char *video, uint32_t file_size) {
+    SD.mkdir("/.cache");
+    SD.mkdir(k_index_dir);
+    File f = SD.open(index_cache_path(video), FILE_WRITE);
+    if (!f) {
+        serial_log("[media] cannot write index cache");
         return;
     }
-    uint8_t *buf = (uint8_t *)psram_alloc(k_video_buf);
-    if (!buf) {
-        f.close();
+    const uint32_t hdr[3] = {k_index_magic, file_size, s_index_count};
+    f.write((const uint8_t *)hdr, sizeof(hdr));
+    f.write((const uint8_t *)s_index, s_index_count * 4);
+    f.close();
+}
+
+/** Called by the reader when a file opens: use the cache, or start a background scan. */
+static void index_begin(const char *video, uint32_t file_size) {
+    s_index_done = false;
+    s_index_count = 0;
+    s_scan_active = false;
+    if (!s_index || !s_scan_buf || index_load(video, file_size)) {
+        return;
+    }
+    s_scan_f = SD.open(video, FILE_READ); /* own handle: the playback read position is untouched */
+    s_scan_off = 0;
+    s_scan_prev_ff = false;
+    s_scan_active = (bool)s_scan_f;
+    s_scan_t0 = millis();
+}
+
+static void index_end(void) {
+    if (s_scan_active) {
+        s_scan_f.close();
+        s_scan_active = false;
+    }
+}
+
+/** Scan one chunk for frame starts (FF D8). Returns false when there is nothing left to do. */
+static bool index_scan_step(const char *video, uint32_t file_size) {
+    if (!s_scan_active) {
+        return false;
+    }
+    const size_t n = s_scan_f.read(s_scan_buf, k_read_chunk);
+    for (size_t i = 0; i < n; i++) {
+        if (s_scan_prev_ff && s_scan_buf[i] == 0xD8) {
+            if (s_index_count >= k_index_max) {
+                serial_log("[media] video too long to index (> %lu frames)", (unsigned long)k_index_max);
+                index_end();
+                return false;
+            }
+            s_index[s_index_count] = s_scan_off + (uint32_t)i - 1;
+            s_index_count = s_index_count + 1;
+        }
+        s_scan_prev_ff = s_scan_buf[i] == 0xFF;
+    }
+    s_scan_off += n;
+    if (n == 0) {
+        index_end();
+        if (s_index_count > 0) {
+            s_index_done = true; /* after every offset is written: the player may now use them */
+            index_save(video, file_size);
+            serial_log("[media] indexed %lu frames in %lu s", (unsigned long)s_index_count,
+                       (unsigned long)((millis() - s_scan_t0) / 1000));
+        }
+        return false;
+    }
+    return true;
+}
+
+static volatile bool s_overlay_on = true; /* written by the UI */
+static lv_img_dsc_t s_video_dsc;           /* lv_img source while a video plays */
+
+static void reader_task(void *arg) {
+    LV_UNUSED(arg);
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        File f = SD.open(s_reader_path, FILE_READ);
+        s_file_size = f ? (uint32_t)f.size() : 0;
+        if (f) {
+            index_begin(s_reader_path, s_file_size);
+        }
+        size_t end = 0, pos = 0, fs = 0, fl = 0;
+        uint32_t base = 0; /* file offset of s_stream[0] */
+        uint32_t gen = s_seek_gen;
+        bool have = false, any = false;
+        while (f && !s_reader_stop) {
+            if (s_seek_req) {
+                s_seek_req = false;
+                gen = s_seek_gen;
+                base = s_seek_to;
+                f.seek(base);
+                end = pos = 0;
+                have = false;
+            }
+            if (!have) {
+                have = next_frame(s_stream, end, &pos, &fs, &fl);
+                if (!have) {
+                    /* Drop consumed bytes, then read one chunk. */
+                    if (pos > 0) {
+                        memmove(s_stream, s_stream + pos, end - pos);
+                        end -= pos;
+                        base += pos;
+                        pos = 0;
+                    }
+                    if (end == k_stream_buf) {
+                        serial_log("[media] frame over %u KB, skipped", (unsigned)(k_stream_buf / 1024));
+                        base += end;
+                        end = 0;
+                    }
+                    const size_t want = (k_stream_buf - end) < k_read_chunk ? (k_stream_buf - end) : k_read_chunk;
+                    const uint32_t t0 = millis();
+                    const size_t n = f.read(s_stream + end, want);
+                    s_read_ms += millis() - t0;
+                    s_read_bytes += n;
+                    /* Same watchdog rule as indexing: if the card is the bottleneck this loop never
+                     * waits on a queue, so give the core-0 idle task a moment after every chunk. */
+                    vTaskDelay(1);
+                    if (n == 0) {
+                        if (!any) {
+                            const uint8_t m = k_slot_end;
+                            xQueueSend(s_full_q, &m, portMAX_DELAY);
+                            break;
+                        }
+                        f.seek(0); /* loop */
+                        end = pos = 0;
+                        base = 0;
+                    }
+                    end += n;
+                    continue;
+                }
+            }
+            if (fl > k_slot_size) {
+                have = false;
+                continue;
+            }
+            uint8_t slot;
+            if (xQueueReceive(s_free_q, &slot, 0) != pdTRUE) {
+                /* Playback is ahead (all slots full): use the time to index the file. */
+                if (index_scan_step(s_reader_path, s_file_size)) {
+                    /*
+                     * Must sleep between chunks. Arduino SD reads busy-wait on SPI, so back-to-back
+                     * chunks kept this task (core 0, prio 2) running for seconds while paused, the
+                     * core-0 idle task never ran, and the 5 s task watchdog reset the chip mid-read -
+                     * which also left the SD card stuck so the next boot couldn't mount it.
+                     */
+                    vTaskDelay(pdMS_TO_TICKS(2));
+                    continue;
+                }
+                if (xQueueReceive(s_free_q, &slot, pdMS_TO_TICKS(50)) != pdTRUE) {
+                    continue; /* still full (or paused): re-check stop / seek, keep the frame */
+                }
+            }
+            if (s_seek_req) {
+                xQueueSend(s_free_q, &slot, 0); /* a seek arrived meanwhile: this frame is stale */
+                have = false;
+                continue;
+            }
+            memcpy(s_slot_data[slot], s_stream + fs, fl);
+            s_slot_len[slot] = fl;
+            s_slot_off[slot] = base + (uint32_t)fs;
+            s_slot_gen[slot] = gen;
+            xQueueSend(s_full_q, &slot, portMAX_DELAY); /* never blocks: queue holds every slot */
+            have = false;
+            any = true;
+        }
+        index_end(); /* an unfinished scan is dropped (and redone next time) */
+        if (f) {
+            f.close();
+        } else {
+            const uint8_t m = k_slot_end;
+            xQueueSend(s_full_q, &m, portMAX_DELAY);
+        }
+        xSemaphoreGive(s_reader_done);
+    }
+}
+
+static bool video_begin(void) {
+    if (s_reader) {
+        return true;
+    }
+    s_stream = (uint8_t *)psram_alloc(k_stream_buf);
+    for (int i = 0; i < k_slots; i++) {
+        s_slot_data[i] = (uint8_t *)psram_alloc(k_slot_size);
+        if (!s_slot_data[i]) {
+            return false;
+        }
+    }
+    if (!s_stream) {
+        return false;
+    }
+    /* Index is optional: without it the length stays an estimate. */
+    s_index = (uint32_t *)psram_alloc(k_index_max * sizeof(uint32_t));
+    s_scan_buf = (uint8_t *)psram_alloc(k_read_chunk);
+    s_free_q = xQueueCreate(k_slots, sizeof(uint8_t));
+    s_full_q = xQueueCreate(k_slots + 1, sizeof(uint8_t));
+    s_reader_done = xSemaphoreCreateBinary();
+    /* Core 0: LVGL is nearly idle there while the direct path plays; priority below LVGL. */
+    xTaskCreatePinnedToCore(reader_task, "media_rd", 6144, nullptr, 2, &s_reader, 0);
+    return true;
+}
+
+/** Show the frame in s_frame[s_back]: direct to the panel, or through LVGL if the overlay is up. */
+static uint32_t show_video_frame(void) {
+    const uint32_t t0 = millis();
+    bsp_display_lock(0);
+    s_video_dsc.data = (const uint8_t *)s_frame[s_back];
+    if (s_overlay_on || lv_scr_act() != s_scr) {
+        lv_obj_invalidate(s_img);
+    } else {
+        lvgl_port_flush_frame(lv_disp_get_default(), (const lv_color_t *)s_frame[s_back]);
+    }
+    bsp_display_unlock();
+    s_back ^= 1;
+    return millis() - t0;
+}
+
+static void fmt_time(char *buf, size_t n, uint32_t s) {
+    if (s >= 3600) {
+        snprintf(buf, n, "%lu:%02lu:%02lu", (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60),
+                 (unsigned long)(s % 60));
+    } else {
+        snprintf(buf, n, "%lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    }
+}
+
+/**
+ * Progress bar + "elapsed / total" (task side). Leaves the bar alone while the user drags it.
+ * An estimated total is shown as "~4:56" until the background index makes it exact.
+ */
+static void ui_progress(int permille, uint32_t elapsed_s, uint32_t total_s, bool exact) {
+    s_total_s = total_s;
+    s_total_exact = exact;
+    char a[16], b[16], buf[40];
+    fmt_time(a, sizeof(a), elapsed_s);
+    fmt_time(b, sizeof(b), total_s);
+    snprintf(buf, sizeof(buf), "%s / %s%s", a, exact ? "" : "~", b);
+    bsp_display_lock(0);
+    if (s_seek_bar && !lv_obj_has_state(s_seek_bar, LV_STATE_PRESSED)) {
+        lv_slider_set_value(s_seek_bar, permille, LV_ANIM_OFF);
+        lv_label_set_text(s_time_lbl, buf);
+    }
+    bsp_display_unlock();
+}
+
+/** Play until a new command arrives (left in the queue for media_task). Loops at end of file. */
+static void play_video(const char *path) {
+    if (!video_begin()) {
         ui_message("Out of memory");
         return;
     }
+    /* Fresh pipeline: all slots free, reader started on this file. */
+    xQueueReset(s_free_q);
+    xQueueReset(s_full_q);
+    for (uint8_t i = 0; i < k_slots; i++) {
+        xQueueSend(s_free_q, &i, 0);
+    }
+    strlcpy(s_reader_path, path, sizeof(s_reader_path));
+    s_reader_stop = false;
+    s_read_bytes = s_read_ms = 0;
+    s_index_done = false; /* the reader re-checks the cache / rescans for this file */
+    s_index_count = 0;
+    xTaskNotifyGive(s_reader);
+
+    /* Black letterbox; lv_img shows the full-screen buffer. */
+    memset(s_frame[0], 0, (size_t)k_scr_w * k_scr_h * 2);
+    memset(s_frame[1], 0, (size_t)k_scr_w * k_scr_h * 2);
+    bsp_display_lock(0);
+    memset(&s_video_dsc, 0, sizeof(s_video_dsc));
+    s_video_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    s_video_dsc.header.w = k_scr_w;
+    s_video_dsc.header.h = k_scr_h;
+    s_video_dsc.data_size = (uint32_t)k_scr_w * k_scr_h * 2;
+    s_video_dsc.data = (const uint8_t *)s_frame[0];
+    lv_img_set_src(s_img, &s_video_dsc);
+    lv_obj_center(s_img);
+    bsp_display_unlock();
+
     const int fps = fps_from_name(path);
     const uint32_t frame_ms = 1000 / fps;
-    size_t end = 0, pos = 0;
-    int scale = 0, vw = 0, vh = 0, src_w = 0, src_h = 0;
-    bool paused = false;
-    uint32_t frames = 0, stat_t0 = millis(), next_due = millis();
-    uint32_t decode_ms = 0;
+    int scale = 0, src_w = 0, src_h = 0, vw = 0, vh = 0, ox = 0, oy = 0;
+    bool paused = false, first = true;
+    bool show_one = false; /* paused + seek: still show the frame at the new position */
+    uint32_t frames = 0, decode_ms = 0, show_ms = 0, frame_bytes = 0, starved = 0;
+    uint32_t stat_t0 = millis(), log_t0 = millis(), next_due = millis(), progress_t0 = 0;
+    /*
+     * Time display. Raw MJPEG has no timestamps, so:
+     *  - elapsed counts the frames actually played (exact, always moves forward); only a seek
+     *    re-estimates it once from the landing offset, and a loop back to the start resets it;
+     *  - total = file size / average frame size over EVERY frame played so far. (A moving average
+     *    of recent frames swung with scene content - busy scenes have bigger frames - which made
+     *    both numbers jump around.)
+     */
+    uint32_t cur_off = 0, last_off = 0;
+    uint64_t bytes_seen = 0;
+    uint32_t frames_seen = 0;
+    uint32_t frame_no = 0;      /* index of the frame on screen */
+    bool need_anchor = false;   /* set by a seek */
+    int32_t anchor_frame = -1;  /* exact frame of the seek target (index known), else -1 */
+    bool have_frame = false;
+    uint32_t shown_total_s = 0; /* only changed when the estimate moves by 2 s or more */
     serial_log("[media] playing %s at up to %d fps", base_name(path), fps);
 
     for (;;) {
-        /* Commands: pause toggles here; anything else ends playback (and is handled by the task). */
         MediaCmd c;
         if (xQueuePeek(s_queue, &c, paused ? pdMS_TO_TICKS(50) : 0) == pdTRUE) {
             if (c.cmd == Cmd::TogglePause) {
@@ -490,42 +863,68 @@ static void play_video(const char *path) {
                 next_due = millis();
                 continue;
             }
+            if (c.cmd == Cmd::Seek) {
+                xQueueReceive(s_queue, &c, 0);
+                const uint32_t permille = (uint32_t)constrain(c.arg, 0, 1000);
+                if (s_index_done) {
+                    /* Exact: the bar is time-based, so jump to that frame's offset. */
+                    const uint32_t n = s_index_count;
+                    uint32_t target = (uint32_t)((uint64_t)n * permille / 1000);
+                    if (target >= n) {
+                        target = n - 1;
+                    }
+                    cur_off = s_index[target];
+                    anchor_frame = (int32_t)target;
+                } else {
+                    cur_off = (uint32_t)((uint64_t)s_file_size * permille / 1000);
+                    anchor_frame = -1; /* estimate the frame number from the landing offset */
+                }
+                s_seek_to = cur_off;
+                s_seek_gen = s_seek_gen + 1;
+                s_seek_req = true; /* reader jumps there; frames from before are dropped below */
+                show_one = paused;
+                need_anchor = true;
+                next_due = millis();
+                progress_t0 = 0; /* refresh the bar as soon as the new frame shows */
+                continue;
+            }
+            break; /* Stop / another file: handled by media_task */
+        }
+        if (paused && !show_one) {
+            continue;
+        }
+
+        uint8_t slot;
+        if (xQueueReceive(s_full_q, &slot, pdMS_TO_TICKS(100)) != pdTRUE) {
+            starved++;
+            continue;
+        }
+        if (slot == k_slot_end) {
+            ui_message("No MJPEG frames found");
             break;
         }
-        if (paused) {
+        if (s_slot_gen[slot] != s_seek_gen) {
+            xQueueSend(s_free_q, &slot, 0); /* read before the last seek: discard */
             continue;
         }
-
-        size_t fs = 0, fl = 0;
-        if (!next_frame(buf, end, &pos, &fs, &fl)) {
-            /* Need more data: drop consumed bytes, then read. */
-            if (pos > 0) {
-                memmove(buf, buf + pos, end - pos);
-                end -= pos;
-                pos = 0;
-            }
-            if (end == k_video_buf) {
-                serial_log("[media] frame larger than %u KB, skipping", (unsigned)(k_video_buf / 1024));
-                end = 0;
-            }
-            const size_t n = f.read(buf + end, k_video_buf - end);
-            if (n == 0) {
-                if (frames == 0 && src_w == 0) {
-                    ui_message("No MJPEG frames found");
-                    break;
-                }
-                f.seek(0); /* loop */
-                end = pos = 0;
-            }
-            end += n;
-            continue;
+        cur_off = s_slot_off[slot];
+        bytes_seen += s_slot_len[slot];
+        frames_seen++;
+        if (need_anchor) {
+            frame_no = anchor_frame >= 0 ? (uint32_t)anchor_frame
+                                         : (uint32_t)(cur_off / ((float)bytes_seen / frames_seen));
+            need_anchor = false;
+        } else if (!have_frame || cur_off < last_off) {
+            frame_no = 0; /* first frame, or looped back to the start */
+        } else {
+            frame_no++;
         }
+        have_frame = true;
+        last_off = cur_off;
 
         const uint32_t t0 = millis();
-        if (!s_jpeg->openRAM(buf + fs, (int)fl, jpeg_draw_cb)) {
-            continue; /* corrupt frame: skip */
-        }
-        if (scale == 0) {
+        const bool opened = s_jpeg->openRAM(s_slot_data[slot], (int)s_slot_len[slot], jpeg_draw_cb);
+        if (opened && scale == 0) {
             src_w = s_jpeg->getWidth();
             src_h = s_jpeg->getHeight();
             scale = jpeg_scale_for(src_w, src_h, k_scr_w, k_scr_h);
@@ -533,39 +932,82 @@ static void play_video(const char *path) {
             vh = (src_h + scale - 1) / scale;
             if (vw > k_scr_w) vw = k_scr_w; /* odd sizes: crop the overflow */
             if (vh > k_scr_h) vh = k_scr_h;
+            ox = (k_scr_w - vw) / 2;
+            oy = (k_scr_h - vh) / 2;
         }
-        JpegTarget t = {s_frame[s_back], vw, vh};
-        s_jpeg->setPixelType(RGB565_BIG_ENDIAN);
-        s_jpeg->setUserPointer(&t);
-        const int ok = s_jpeg->decode(0, 0, jpeg_option(scale));
-        s_jpeg->close();
+        int ok = 0;
+        if (opened) {
+            JpegTarget t = {s_frame[s_back] + (size_t)oy * k_scr_w + ox, k_scr_w, vw, vh};
+            s_jpeg->setPixelType(RGB565_BIG_ENDIAN);
+            s_jpeg->setUserPointer(&t);
+            ok = s_jpeg->decode(0, 0, jpeg_option(scale));
+            s_jpeg->close();
+        }
+        frame_bytes += s_slot_len[slot];
+        xQueueSend(s_free_q, &slot, 0); /* data consumed: let the reader refill it */
         decode_ms += millis() - t0;
         if (!ok) {
-            continue;
+            continue; /* corrupt frame: skip */
         }
 
-        /* Pace to the target frame rate (if decoding is fast enough to need it). */
         const int32_t wait = (int32_t)(next_due - millis());
         if (wait > 0) {
             vTaskDelay(pdMS_TO_TICKS(wait));
         }
         next_due = millis() + frame_ms;
-        present(vw, vh);
+        if (first) {
+            first = false;
+            ui_message("");
+        }
+        show_ms += show_video_frame();
         frames++;
+        show_one = false;
 
         const uint32_t now = millis();
-        if (now - stat_t0 >= 1000) {
+        /* Progress: only drawn with the controls up (direct-to-panel frames would hide it anyway). */
+        if (s_overlay_on && (progress_t0 == 0 || now - progress_t0 >= 250)) {
+            progress_t0 = now;
+            const uint32_t size = s_file_size;
+            const uint32_t elapsed_s = frame_no / fps;
+            if (s_index_done) {
+                /* Exact length from the frame index; the bar becomes time-based (matches seeking). */
+                const uint32_t n = s_index_count;
+                const uint32_t total_s = (n + fps - 1) / fps;
+                ui_progress((int)((uint64_t)frame_no * 1000 / n), elapsed_s, total_s, true);
+            } else {
+                const float avg = (float)bytes_seen / frames_seen;
+                const uint32_t total_s = (uint32_t)(size / avg / fps);
+                if (shown_total_s == 0 || abs((int)total_s - (int)shown_total_s) >= 2) {
+                    shown_total_s = total_s;
+                }
+                if (elapsed_s > shown_total_s) {
+                    shown_total_s = elapsed_s; /* never show elapsed past the end */
+                }
+                /* Bar: byte position (what seeking uses without an index); always moves forward. */
+                ui_progress(size ? (int)((uint64_t)cur_off * 1000 / size) : 0, elapsed_s, shown_total_s, false);
+            }
+        }
+        if (now - stat_t0 >= 1000 && s_overlay_on) {
             char info[64];
-            snprintf(info, sizeof(info), "%dx%d  -  %.1f fps  (decode %lu ms)", src_w, src_h,
-                     frames * 1000.0f / (now - stat_t0), (unsigned long)(decode_ms / (frames ? frames : 1)));
+            snprintf(info, sizeof(info), "%dx%d  -  %.1f fps", src_w, src_h, frames * 1000.0f / (now - log_t0));
             ui_info(info);
-            frames = 0;
-            decode_ms = 0;
             stat_t0 = now;
         }
+        if (now - log_t0 >= 5000) {
+            const uint32_t n = frames ? frames : 1;
+            serial_log("[media] %.1f fps | decode %lu ms, show %lu ms | frame %lu KB, SD %lu KB/s | waited for SD %lux",
+                       frames * 1000.0f / (now - log_t0), (unsigned long)(decode_ms / n), (unsigned long)(show_ms / n),
+                       (unsigned long)(frame_bytes / n / 1024),
+                       (unsigned long)(s_read_ms ? s_read_bytes / s_read_ms : 0), (unsigned long)starved);
+            frames = decode_ms = show_ms = frame_bytes = starved = 0;
+            s_read_bytes = s_read_ms = 0;
+            log_t0 = now;
+        }
     }
-    f.close();
-    heap_caps_free(buf);
+
+    /* Stop the reader and wait until it has closed the file. */
+    s_reader_stop = true;
+    xSemaphoreTake(s_reader_done, portMAX_DELAY);
 }
 
 /* ---------- task ---------- */
@@ -590,6 +1032,7 @@ static void media_task(void *arg) {
             play_video(c.path);
             break;
         case Cmd::TogglePause:
+        case Cmd::Seek:
         case Cmd::Stop:
             break;
         }
@@ -617,15 +1060,17 @@ static bool media_begin(void) {
     s_jpeg = new (jm) JPEGDEC();
     s_png = new (pm) PNG();
     s_queue = xQueueCreate(4, sizeof(MediaCmd));
-    /* Core 1, above loop()/weather (1): decoding should win, the UI lives on core 0 anyway. */
-    xTaskCreatePinnedToCore(media_task, "media", 12288, nullptr, 3, &s_task, 1);
+    /* Core 1 at loop()'s priority (1): a higher one let back-to-back decoding starve loop() (WiFi
+     * housekeeping). loop() sleeps 5 ms per pass, so decoding still gets nearly all of core 1. */
+    xTaskCreatePinnedToCore(media_task, "media", 12288, nullptr, 1, &s_task, 1);
     serial_log("[media] ready (JPEGDEC %u B, PNG %u B)", (unsigned)sizeof(JPEGDEC), (unsigned)sizeof(PNG));
     return true;
 }
 
-static void send(Cmd cmd, const char *path) {
+static void send(Cmd cmd, const char *path, int arg = 0) {
     MediaCmd c;
     c.cmd = cmd;
+    c.arg = arg;
     strlcpy(c.path, path ? path : "", sizeof(c.path));
     if (xQueueSend(s_queue, &c, 0) != pdTRUE) {
         /* Queue full: drop the oldest so the latest request still gets through. */
@@ -638,6 +1083,7 @@ static void send(Cmd cmd, const char *path) {
 /* ---------- UI ---------- */
 
 static void set_overlay_visible(bool show) {
+    s_overlay_on = show; /* player: direct-to-panel only while the controls are hidden */
     auto apply = [show](lv_obj_t *o) {
         if (!o) {
             return;
@@ -651,7 +1097,7 @@ static void set_overlay_visible(bool show) {
     apply(s_overlay);
     apply(s_video_mode ? nullptr : s_prev_btn);
     apply(s_video_mode ? nullptr : s_next_btn);
-    apply(s_video_mode ? s_play_btn : nullptr);
+    apply(s_video_mode ? s_bottom : nullptr);
     if (show) {
         lv_timer_reset(s_hide_timer);
         lv_timer_resume(s_hide_timer);
@@ -663,10 +1109,28 @@ static void hide_timer_cb(lv_timer_t *t) {
     set_overlay_visible(false);
 }
 
+/**
+ * Overlay title. The built-in Montserrat font only covers Latin, so names with Chinese (or any
+ * other non-ASCII) characters use the SD UI font, as the Files list does.
+ */
+static void set_title(const char *text) {
+    bool ascii = true;
+    for (const char *p = text; *p; p++) {
+        if ((unsigned char)*p >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    lv_obj_set_style_text_font(s_title, ascii ? &lv_font_montserrat_16 : ui_font_get(), 0);
+    lv_label_set_text(s_title, text);
+}
+
 static void show_image_at(size_t i) {
     s_image_i = i;
-    lv_label_set_text_fmt(s_title, "%s  (%u/%u)", base_name(s_images[i].c_str()), (unsigned)(i + 1),
-                          (unsigned)s_images.size());
+    char title[300];
+    snprintf(title, sizeof(title), "%s  (%u/%u)", base_name(s_images[i].c_str()), (unsigned)(i + 1),
+             (unsigned)s_images.size());
+    set_title(title);
     lv_label_set_text(s_info, "");
     send(Cmd::ShowImage, s_images[i].c_str());
 }
@@ -707,9 +1171,32 @@ static void play_cb(lv_event_t *e) {
     set_overlay_visible(true);
 }
 
+/**
+ * Progress bar: dragging previews the target time and keeps the controls up; releasing seeks.
+ * The player doesn't move the bar while it's pressed (see ui_progress).
+ */
+static void seek_cb(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    const int v = lv_slider_get_value(s_seek_bar);
+    if (code == LV_EVENT_PRESSED) {
+        lv_timer_pause(s_hide_timer);
+    } else if (code == LV_EVENT_VALUE_CHANGED && lv_obj_has_state(s_seek_bar, LV_STATE_PRESSED)) {
+        char a[16], b[16];
+        fmt_time(a, sizeof(a), (uint32_t)((uint64_t)s_total_s * v / 1000));
+        fmt_time(b, sizeof(b), s_total_s);
+        lv_label_set_text_fmt(s_time_lbl, "%s / %s%s", a, s_total_exact ? "" : "~", b);
+    } else if (code == LV_EVENT_RELEASED) {
+        send(Cmd::Seek, nullptr, v);
+        set_overlay_visible(true); /* restarts the auto-hide countdown */
+    }
+}
+
 static void screen_cb(lv_event_t *e) {
     const lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_GESTURE) {
+        if (s_video_mode) {
+            return; /* swipes are for stepping through images only */
+        }
         const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
         if (dir == LV_DIR_LEFT) {
             step_image(+1);
@@ -796,8 +1283,43 @@ static void build_screen(void) {
     lv_obj_align(s_prev_btn, LV_ALIGN_LEFT_MID, 10, 20);
     s_next_btn = round_btn(s_scr, LV_SYMBOL_RIGHT, next_cb, nullptr);
     lv_obj_align(s_next_btn, LV_ALIGN_RIGHT_MID, -10, 20);
-    s_play_btn = round_btn(s_scr, LV_SYMBOL_PAUSE, play_cb, &s_play_lbl);
-    lv_obj_align(s_play_btn, LV_ALIGN_BOTTOM_MID, 0, -12);
+    /* Bottom bar (video): play/pause | progress (drag to seek) | elapsed / total */
+    s_bottom = lv_obj_create(s_scr);
+    lv_obj_remove_style_all(s_bottom);
+    lv_obj_set_size(s_bottom, LV_PCT(100), 56);
+    lv_obj_align(s_bottom, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_bottom, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_bottom, LV_OPA_60, 0);
+    lv_obj_set_style_pad_hor(s_bottom, 10, 0);
+    lv_obj_set_style_pad_column(s_bottom, 16, 0);
+    lv_obj_set_flex_flow(s_bottom, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_bottom, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(s_bottom, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_play_btn = round_btn(s_bottom, LV_SYMBOL_PAUSE, play_cb, &s_play_lbl);
+    lv_obj_set_size(s_play_btn, 44, 44);
+
+    s_seek_bar = lv_slider_create(s_bottom);
+    lv_slider_set_range(s_seek_bar, 0, 1000);
+    lv_obj_set_height(s_seek_bar, 6);
+    lv_obj_set_flex_grow(s_seek_bar, 1);
+    lv_obj_set_style_bg_color(s_seek_bar, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_seek_bar, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_seek_bar, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_seek_bar, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_seek_bar, 6, LV_PART_KNOB);
+    /* Generous touch area around the thin bar */
+    lv_obj_set_ext_click_area(s_seek_bar, 16);
+    lv_obj_clear_flag(s_seek_bar, LV_OBJ_FLAG_GESTURE_BUBBLE); /* a fast drag must not count as a swipe */
+    lv_obj_clear_flag(s_bottom, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(s_seek_bar, seek_cb, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_seek_bar, seek_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(s_seek_bar, seek_cb, LV_EVENT_RELEASED, nullptr);
+
+    s_time_lbl = lv_label_create(s_bottom);
+    lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_time_lbl, lv_color_white(), 0);
+    lv_label_set_text(s_time_lbl, "0:00 / 0:00");
 
     s_hide_timer = lv_timer_create(hide_timer_cb, k_overlay_hide_ms, nullptr);
     lv_timer_pause(s_hide_timer);
@@ -814,7 +1336,7 @@ static void enter(bool video) {
     lv_obj_clear_flag(s_msg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_prev_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_next_btn, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_play_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_bottom, LV_OBJ_FLAG_HIDDEN);
     lv_scr_load(s_scr);
     set_overlay_visible(true);
 }
@@ -833,8 +1355,11 @@ void media_ui_open_video(const String &path) {
         return;
     }
     enter(true);
-    lv_label_set_text(s_title, base_name(path.c_str()));
+    set_title(base_name(path.c_str()));
     lv_label_set_text(s_info, "");
+    lv_slider_set_value(s_seek_bar, 0, LV_ANIM_OFF);
+    lv_label_set_text(s_time_lbl, "0:00 / --:--");
+    s_total_s = 0;
     lv_label_set_text(s_play_lbl, LV_SYMBOL_PAUSE);
     send(Cmd::PlayVideo, path.c_str());
 }

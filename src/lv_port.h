@@ -159,6 +159,16 @@ bool lvgl_port_lock(uint32_t timeout_ms);
  */
 void lvgl_port_unlock(void);
 
+/**
+ * @brief Send a full-screen frame straight to the panel, bypassing LVGL rendering
+ *
+ * The frame is hor_res x ver_res in LVGL's (rotated) orientation and pixel format; it goes through
+ * the same rotate-and-send path as LVGL's own flush. Used for video, where composing the screen
+ * in LVGL first would only copy the frame once more. Caller must hold lvgl_port_lock().
+ * LVGL's next refresh draws over it, so only use it while nothing on screen is invalidated.
+ */
+void lvgl_port_flush_frame(lv_disp_t *disp, const lv_color_t *frame);
+
 #ifdef __cplusplus
 }
 #endif

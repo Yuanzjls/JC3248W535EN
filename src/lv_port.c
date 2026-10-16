@@ -432,7 +432,9 @@ static bool lvgl_port_flush_ready_callback(esp_lcd_panel_io_handle_t panel_io, e
 }
 #endif
 
-static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+/* Rotate (if configured) and send one area to the panel. Used by LVGL's flush and by the direct
+ * full-frame path (video). Returns when the last chunk has been queued. */
+static void flush_area(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
     assert(drv != NULL);
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)drv->user_data;
@@ -575,7 +577,19 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
     } else {
         esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, x_start, y_start, x_end + 1, y_end + 1, color_map);
     }
+}
+
+static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+{
+    flush_area(drv, area, color_map);
     lv_disp_flush_ready(drv);
+}
+
+void lvgl_port_flush_frame(lv_disp_t *disp, const lv_color_t *frame)
+{
+    assert(disp != NULL && frame != NULL);
+    const lv_area_t area = {0, 0, (lv_coord_t)(disp->driver->hor_res - 1), (lv_coord_t)(disp->driver->ver_res - 1)};
+    flush_area(disp->driver, &area, (lv_color_t *)frame);
 }
 
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT

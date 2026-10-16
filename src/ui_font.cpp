@@ -106,12 +106,44 @@ static void font_load_diagnose(void) {
     }
 }
 
+/*
+ * A chip reset (watchdog, crash, reset button) doesn't reset the SD card: if it happened during a
+ * read, the card is still sending that block and ignores the init command, so the mount fails with
+ * "physical drive cannot work". Clock out enough dummy bytes for any block in flight to finish,
+ * then deselect the card and give it the 74+ idle clocks that SD init expects.
+ */
+static void sd_unstick(void) {
+    pinMode(SDCARD_CS, OUTPUT);
+    s_sd_spi.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SDCARD_CS, LOW);
+    for (int i = 0; i < 1024; i++) { /* > one 512-byte block + CRC + token */
+        s_sd_spi.transfer(0xFF);
+    }
+    digitalWrite(SDCARD_CS, HIGH);
+    for (int i = 0; i < 16; i++) { /* 128 clocks with the card deselected */
+        s_sd_spi.transfer(0xFF);
+    }
+    s_sd_spi.endTransaction();
+}
+
 bool ui_font_mount_sd(void) {
     serial_log("[ui_font] SD: initializing SPI (HSPI)...");
     s_sd_spi.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
-    /* 20 MHz: 4 MHz made the 2.3 MB font take seconds to read. Drop back if the card is flaky. */
-    if (!SD.begin(SDCARD_CS, s_sd_spi, 20000000, k_sd_mount, 5, false)) {
-        serial_log("[ui_font] SD: mount FAILED (mount point \"%s\")", k_sd_mount);
+    /* 20 MHz: 4 MHz made the 2.3 MB font take seconds to read. Retries drop to 4 MHz. */
+    static const uint32_t k_freqs[] = {20000000, 4000000, 4000000};
+    bool mounted = false;
+    for (int attempt = 0; attempt < 3 && !mounted; attempt++) {
+        if (attempt > 0) {
+            serial_log("[ui_font] SD: mount failed, recovering card (attempt %d/3)", attempt + 1);
+            SD.end();
+            sd_unstick();
+            delay(100);
+        }
+        mounted = SD.begin(SDCARD_CS, s_sd_spi, k_freqs[attempt], k_sd_mount, 5, false);
+    }
+    if (!mounted) {
+        serial_log("[ui_font] SD: mount FAILED (mount point \"%s\") - card missing? unplug power to reset it",
+                   k_sd_mount);
         return false;
     }
     uint8_t t = SD.cardType();

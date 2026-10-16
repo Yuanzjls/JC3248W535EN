@@ -126,6 +126,23 @@ static void log_summary(void) {
                (unsigned long)((s_stats.psram_total - s_stats.psram_free) / 1024),
                (unsigned long)(s_stats.psram_total / 1024));
     serial_log("[sys] top tasks: %s", s_stats.top);
+
+    /*
+     * Leak check: change since the previous summary. Apps allocate once on first open (screens,
+     * video buffers), so jumps right after opening something new are expected; a leak is used
+     * memory that keeps climbing while the same thing is repeated.
+     */
+    static bool have_prev = false;
+    static int32_t prev_ram = 0, prev_psram = 0;
+    const int32_t ram = (int32_t)(s_stats.heap_total - s_stats.heap_free);
+    const int32_t psram = (int32_t)(s_stats.psram_total - s_stats.psram_free);
+    if (have_prev) {
+        serial_log("[sys] since last: RAM %+ld KB, PSRAM %+ld KB", (long)((ram - prev_ram) / 1024),
+                   (long)((psram - prev_psram) / 1024));
+    }
+    prev_ram = ram;
+    prev_psram = psram;
+    have_prev = true;
 }
 
 static void sysmon_timer_cb(lv_timer_t *t) {

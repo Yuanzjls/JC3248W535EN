@@ -326,7 +326,9 @@ static void show_dir(const String &path) {
     if (dir && dir.isDirectory()) {
         File f = dir.openNextFile();
         while (f) {
-            if (s_entries.size() < k_max_entries) {
+            if (f.name()[0] == '.') {
+                /* hidden: our /.cache (video indexes), macOS "._" files, etc. */
+            } else if (s_entries.size() < k_max_entries) {
                 const time_t mtime = f.getLastWrite();
                 s_entries.push_back({String(f.name()), f.isDirectory(), (uint32_t)f.size(), mtime});
             } else {
