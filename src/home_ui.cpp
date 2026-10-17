@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <time.h>
 
+#include "air_ui.h"
 #include "breakout_ui.h"
 #include "clock_ui.h"
 #include "files_ui.h"
@@ -19,6 +20,7 @@ static lv_obj_t *s_home_scr = nullptr;
 static lv_obj_t *s_bar = nullptr;
 static lv_obj_t *s_clock_tile_time = nullptr;
 static lv_obj_t *s_weather_tile_temp = nullptr;
+static lv_obj_t *s_air_tile_val = nullptr;
 
 typedef void (*app_open_fn)(void);
 
@@ -41,6 +43,9 @@ static void home_timer_cb(lv_timer_t *t) {
         return;
     }
     lv_label_set_text(s_weather_tile_temp, weather_ui_tile_text());
+    lv_color_t air_color;
+    lv_label_set_text(s_air_tile_val, air_ui_tile_text(&air_color));
+    lv_obj_set_style_bg_color(lv_obj_get_parent(s_air_tile_val), air_color, 0); /* tile colour = radon level */
 
     const time_t now = time(nullptr);
     if (now < 1700000000) {
@@ -126,6 +131,9 @@ void home_ui_init(void) {
                        files_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_PLAY, &lv_font_montserrat_28, "Breakout",
                        lv_palette_main(LV_PALETTE_DEEP_PURPLE), breakout_ui_open);
+    lv_color_t air_color;
+    const char *air_text = air_ui_tile_text(&air_color);
+    s_air_tile_val = add_app_tile(apps, air_text, &lv_font_montserrat_24, "Air", air_color, air_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_SETTINGS, &lv_font_montserrat_30, "Settings",
                        lv_palette_main(LV_PALETTE_BLUE_GREY), settings_ui_open);
 
@@ -148,6 +156,7 @@ static void release_apps_cb(void *arg) {
     weather_ui_release();
     files_ui_release();
     settings_ui_release();
+    air_ui_release();
 }
 
 void home_ui_show(void) {

@@ -12,6 +12,7 @@
 #include "home_ui.h"
 #include "weather.h"
 #include "settings.h"
+#include "airthings.h"
 #include "sysmon.h"
 
 
@@ -140,6 +141,7 @@ void setup()
 
   /* Background weather fetch (waits for WiFi on its own). */
   weather_begin();
+  airthings_begin(); /* BLE radon sensor, if one was chosen (/airthings.ini) */
 
   serial_log("[boot] setup done in %lu ms total (free heap %lu, free PSRAM %lu)", (unsigned long)(millis() - s_boot_t0),
              (unsigned long)ESP.getFreeHeap(), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
