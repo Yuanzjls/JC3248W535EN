@@ -107,10 +107,13 @@ static void font_load_diagnose(void) {
 }
 
 /*
- * A chip reset (watchdog, crash, reset button) doesn't reset the SD card: if it happened during a
- * read, the card is still sending that block and ignores the init command, so the mount fails with
- * "physical drive cannot work". Clock out enough dummy bytes for any block in flight to finish,
- * then deselect the card and give it the 74+ idle clocks that SD init expects.
+ * A chip reset (USB reset from uploading or opening the monitor, watchdog, crash, reset button)
+ * doesn't reset the SD card - it keeps its power. If the reset hit in the middle of:
+ *  - a read: the card is still sending that block and ignores the init command;
+ *  - a write: the card is busy programming its flash and holds its data line (MISO) low until done.
+ * Either way the mount fails with "physical drive cannot work". So: clock out enough dummy bytes
+ * for any block in flight to finish, wait (card selected) until it stops signalling busy, then
+ * deselect it and give it the 74+ idle clocks that SD init expects.
  */
 static void sd_unstick(void) {
     pinMode(SDCARD_CS, OUTPUT);
@@ -118,6 +121,15 @@ static void sd_unstick(void) {
     digitalWrite(SDCARD_CS, LOW);
     for (int i = 0; i < 1024; i++) { /* > one 512-byte block + CRC + token */
         s_sd_spi.transfer(0xFF);
+    }
+    /* Busy = card drives 0x00; idle = 0xFF. Wait for 8 idle bytes in a row (up to 500 ms). */
+    const uint32_t t0 = millis();
+    int idle = 0;
+    while (idle < 8 && millis() - t0 < 500) {
+        idle = (s_sd_spi.transfer(0xFF) == 0xFF) ? idle + 1 : 0;
+    }
+    if (idle < 8) {
+        serial_log("[ui_font] SD: card still busy after 500 ms");
     }
     digitalWrite(SDCARD_CS, HIGH);
     for (int i = 0; i < 16; i++) { /* 128 clocks with the card deselected */
@@ -129,22 +141,32 @@ static void sd_unstick(void) {
 bool ui_font_mount_sd(void) {
     serial_log("[ui_font] SD: initializing SPI (HSPI)...");
     s_sd_spi.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
-    /* 20 MHz: 4 MHz made the 2.3 MB font take seconds to read. Retries drop to 4 MHz. */
-    static const uint32_t k_freqs[] = {20000000, 4000000, 4000000};
+    /*
+     * 20 MHz first: 4 MHz made the 2.3 MB font take seconds to read. Retries (after a reset that
+     * interrupted the card) run at 4 MHz with growing pauses, ~2 s in total, before giving up.
+     */
+    static const uint32_t k_freqs[] = {20000000, 4000000, 4000000, 4000000, 4000000};
+    static const uint32_t k_pause_ms[] = {0, 100, 250, 500, 1000};
+    static const int k_attempts = sizeof(k_freqs) / sizeof(k_freqs[0]);
     bool mounted = false;
-    for (int attempt = 0; attempt < 3 && !mounted; attempt++) {
+    int attempt = 0;
+    for (; attempt < k_attempts && !mounted; attempt++) {
         if (attempt > 0) {
-            serial_log("[ui_font] SD: mount failed, recovering card (attempt %d/3)", attempt + 1);
+            serial_log("[ui_font] SD: mount failed, recovering card (attempt %d/%d)", attempt + 1, k_attempts);
             SD.end();
             sd_unstick();
-            delay(100);
+            delay(k_pause_ms[attempt]);
         }
         mounted = SD.begin(SDCARD_CS, s_sd_spi, k_freqs[attempt], k_sd_mount, 5, false);
     }
     if (!mounted) {
-        serial_log("[ui_font] SD: mount FAILED (mount point \"%s\") - card missing? unplug power to reset it",
+        serial_log("[ui_font] SD: mount FAILED (mount point \"%s\") - card missing or stuck: unplug the board "
+                   "for a few seconds to power-cycle the card",
                    k_sd_mount);
         return false;
+    }
+    if (attempt > 1) {
+        serial_log("[ui_font] SD: recovered on attempt %d (at %lu Hz)", attempt, (unsigned long)k_freqs[attempt - 1]);
     }
     uint8_t t = SD.cardType();
     const char *type =

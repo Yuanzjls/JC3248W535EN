@@ -628,6 +628,7 @@ static bool index_scan_step(const char *video, uint32_t file_size) {
 }
 
 static volatile bool s_overlay_on = true; /* written by the UI */
+static volatile bool s_video_paused = false; /* player -> reader: index at full speed only while paused */
 static lv_img_dsc_t s_video_dsc;           /* lv_img source while a video plays */
 
 static void reader_task(void *arg) {
@@ -703,7 +704,9 @@ static void reader_task(void *arg) {
                      * core-0 idle task never ran, and the 5 s task watchdog reset the chip mid-read -
                      * which also left the SD card stuck so the next boot couldn't mount it.
                      */
-                    vTaskDelay(pdMS_TO_TICKS(2));
+                    /* While playing, only one chunk per 100 ms: full-speed counting kept core 0 busy
+                     * (SD reads busy-wait) and starved the UI. Full speed while paused. */
+                    vTaskDelay(pdMS_TO_TICKS(s_video_paused ? 2 : 100));
                     continue;
                 }
                 if (xQueueReceive(s_free_q, &slot, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -820,6 +823,7 @@ static void play_video(const char *path) {
     }
     strlcpy(s_reader_path, path, sizeof(s_reader_path));
     s_reader_stop = false;
+    s_video_paused = false;
     s_read_bytes = s_read_ms = 0;
     s_index_done = false; /* the reader re-checks the cache / rescans for this file */
     s_index_count = 0;
@@ -870,6 +874,7 @@ static void play_video(const char *path) {
             if (c.cmd == Cmd::TogglePause) {
                 xQueueReceive(s_queue, &c, 0);
                 paused = !paused;
+                s_video_paused = paused;
                 ui_info(paused ? "Paused" : "Playing");
                 next_due = millis();
                 continue;

@@ -18,6 +18,7 @@
 #include "esp_lcd_panel_interface.h"
 
 #include "lv_port.h"
+#include "serial_log.h"
 #include "lvgl.h"
 
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
@@ -377,8 +378,20 @@ static void lvgl_port_task(void *arg)
 
     ESP_LOGI(TAG, "Starting LVGL task");
     lvgl_port_ctx.running = true;
+    /* Stall diagnostics: touch is only read inside lv_timer_handler(), so long gaps = dead UI. */
+    int64_t last_run_us = 0; /* 0 = not run yet: setup() holds the lock while building screens */
+    int64_t last_report_us = 0;
     while (lvgl_port_ctx.running) {
+        const int64_t want_us = esp_timer_get_time();
         if (lvgl_port_lock(0)) {
+            const int64_t got_us = esp_timer_get_time();
+            const int64_t gap_ms = (got_us - last_run_us) / 1000;
+            if (last_run_us != 0 && gap_ms > 300 && got_us - last_report_us > 1000000) {
+                last_report_us = got_us;
+                serial_log("[ui] LVGL stalled %ld ms (waited %ld ms for the display lock)", (long)gap_ms,
+                           (long)((got_us - want_us) / 1000));
+            }
+            last_run_us = got_us;
             task_delay_ms = lv_timer_handler();
             lvgl_port_unlock();
         }
@@ -613,12 +626,23 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
         /* Read data from touch controller */
         bool touchpad_pressed = esp_lcd_touch_get_coordinates(touch_ctx->handle, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
+        /* Diagnostics: log a new press (at most once a second) to tell "touch not seen" apart from
+         * "touch seen but not acted on". */
+        static bool was_pressed = false;
+        static int64_t last_log_us = 0;
         if (touchpad_pressed && touchpad_cnt > 0) {
             data->point.x = touchpad_x[0];
             data->point.y = touchpad_y[0];
             data->state = LV_INDEV_STATE_PRESSED;
+            const int64_t now_us = esp_timer_get_time();
+            if (!was_pressed && now_us - last_log_us > 1000000) {
+                last_log_us = now_us;
+                serial_log("[touch] press %u,%u", (unsigned)touchpad_x[0], (unsigned)touchpad_y[0]);
+            }
+            was_pressed = true;
         } else {
             data->state = LV_INDEV_STATE_RELEASED;
+            was_pressed = false;
         }
     }
 }
