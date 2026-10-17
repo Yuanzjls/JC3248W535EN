@@ -27,3 +27,6 @@ void settings_format_hm(char *buf, size_t n, const struct tm *ti, bool with_ampm
 
 /** Show the Settings app (LVGL context / under bsp_display_lock). */
 void settings_ui_open(void);
+
+/** Delete the Settings screen (rebuilt on next open). LVGL context. */
+void settings_ui_release(void);

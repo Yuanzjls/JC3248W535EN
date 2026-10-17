@@ -135,9 +135,26 @@ void home_ui_init(void) {
     serial_log("[home] home screen shown");
 }
 
+/**
+ * Free the heavier app screens once Home is showing (they are rebuilt on next open; Weather keeps
+ * its data and Files its folder). Breakout stays so a paused game survives; Clock and WiFi are
+ * small, and the WiFi screen receives status updates in the background.
+ */
+static void release_apps_cb(void *arg) {
+    LV_UNUSED(arg);
+    if (lv_scr_act() != s_home_scr) {
+        return; /* user already opened something else */
+    }
+    weather_ui_release();
+    files_ui_release();
+    settings_ui_release();
+}
+
 void home_ui_show(void) {
     if (s_home_scr && lv_scr_act() != s_home_scr) {
         lv_scr_load(s_home_scr);
+        /* Async: the Home button that got us here lives on one of the screens being deleted. */
+        lv_async_call(release_apps_cb, nullptr);
     }
 }
 

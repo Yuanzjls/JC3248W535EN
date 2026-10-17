@@ -68,6 +68,18 @@ static void screen_loaded_cb(lv_event_t *e) {
     status_timer_cb(nullptr);
 }
 
+/** Apps free their screens on exit: drop the bar from the registry when it is deleted. */
+static void bar_deleted_cb(lv_event_t *e) {
+    lv_obj_t *bar = lv_event_get_target(e);
+    for (int i = 0; i < s_bar_count; i++) {
+        if (s_bars[i].bar == bar) {
+            s_bars[i] = s_bars[s_bar_count - 1];
+            s_bar_count--;
+            return;
+        }
+    }
+}
+
 static lv_obj_t *make_info_label(lv_obj_t *parent, const lv_font_t *font, const char *text) {
     lv_obj_t *l = lv_label_create(parent);
     lv_obj_set_style_text_font(l, font, 0);
@@ -110,6 +122,7 @@ lv_obj_t *status_bar_create(lv_obj_t *parent, const char *title, bool show_home)
     b.time = make_info_label(b.bar, &lv_font_montserrat_20, "--:--");
 
     lv_obj_add_event_cb(lv_obj_get_screen(b.bar), screen_loaded_cb, LV_EVENT_SCREEN_LOADED, nullptr);
+    lv_obj_add_event_cb(b.bar, bar_deleted_cb, LV_EVENT_DELETE, nullptr);
     if (!s_timer) {
         s_timer = lv_timer_create(status_timer_cb, 1000, nullptr);
     }

@@ -51,6 +51,7 @@ struct Meter {
 };
 static Meter s_cpu0, s_cpu1, s_ram, s_psram;
 static lv_obj_t *s_top_tasks = nullptr;
+static lv_timer_t *s_sys_timer = nullptr;
 
 /* ---------- callbacks ---------- */
 
@@ -301,7 +302,7 @@ static void build_screen(void) {
     lv_obj_set_style_text_font(s_top_tasks, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_top_tasks, ui_color_text_muted(), 0);
     lv_label_set_text(s_top_tasks, "Measuring...");
-    (void)lv_timer_create(system_timer_cb, 1000, nullptr);
+    s_sys_timer = lv_timer_create(system_timer_cb, 1000, nullptr);
 
     /* About */
     lv_obj_t *about = lv_obj_create(list);
@@ -322,4 +323,15 @@ void settings_ui_open(void) {
     sync_from_state();
     update_system_card();
     lv_scr_load(s_scr);
+}
+
+void settings_ui_release(void) {
+    if (!s_scr || lv_scr_act() == s_scr) {
+        return;
+    }
+    lv_timer_del(s_sys_timer); /* it reads the System card's widgets */
+    s_sys_timer = nullptr;
+    lv_obj_del(s_scr);
+    s_scr = s_slider = s_slider_val = s_tz_dd = s_units_bm = s_clock_bm = s_about = s_top_tasks = nullptr;
+    s_cpu0 = s_cpu1 = s_ram = s_psram = Meter{nullptr, nullptr};
 }

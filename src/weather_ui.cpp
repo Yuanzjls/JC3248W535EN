@@ -388,3 +388,15 @@ void weather_ui_on_status(void) {
 const char *weather_ui_tile_text(void) {
     return s_tile_text;
 }
+
+void weather_ui_release(void) {
+    if (!s_scr || lv_scr_act() == s_scr) {
+        return;
+    }
+    lv_obj_del(s_scr); /* children, the status bar and all icon shapes go with it */
+    s_scr = s_bar = s_icon = s_temp = s_cond = s_details = s_status = nullptr;
+    s_hourly_strip = s_daily_strip = nullptr;
+    memset(s_hour_cards, 0, sizeof(s_hour_cards));
+    memset(s_day_cards, 0, sizeof(s_day_cards));
+    /* s_data / s_tile_text stay: the rebuilt screen shows the same forecast at once. */
+}

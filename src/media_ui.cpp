@@ -41,7 +41,7 @@ static const uint32_t k_overlay_hide_ms = 3000;
 
 /* ---------- shared state ---------- */
 
-enum class Cmd { ShowImage, PlayVideo, TogglePause, Seek, Stop };
+enum class Cmd { ShowImage, PlayVideo, TogglePause, Seek, Stop, Release };
 struct MediaCmd {
     Cmd cmd;
     int arg; /* Seek: position in 1/1000 of the file */
@@ -50,6 +50,9 @@ struct MediaCmd {
 
 static QueueHandle_t s_queue = nullptr;
 static TaskHandle_t s_task = nullptr;
+static volatile bool s_released = false; /* media task freed its buffers after Back */
+static lv_timer_t *s_reaper = nullptr;   /* deletes the viewer screen once released */
+static bool ensure_decoders(void);
 
 static uint16_t *s_frame[2] = {nullptr, nullptr};
 static lv_img_dsc_t s_dsc[2];
@@ -381,6 +384,10 @@ static bool decode_bmp(uint8_t *data, size_t len, char *info, size_t info_n) {
 /* ---------- stills ---------- */
 
 static void show_still(const char *path) {
+    if (!ensure_decoders()) {
+        ui_message("Out of memory");
+        return;
+    }
     ui_message("Loading...");
     char info[96] = "";
     File f = SD.open(path, FILE_READ);
@@ -756,6 +763,10 @@ static bool video_begin(void) {
 static uint32_t show_video_frame(void) {
     const uint32_t t0 = millis();
     bsp_display_lock(0);
+    if (!s_img) { /* screen already released */
+        bsp_display_unlock();
+        return 0;
+    }
     s_video_dsc.data = (const uint8_t *)s_frame[s_back];
     if (s_overlay_on || lv_scr_act() != s_scr) {
         lv_obj_invalidate(s_img);
@@ -797,7 +808,7 @@ static void ui_progress(int permille, uint32_t elapsed_s, uint32_t total_s, bool
 
 /** Play until a new command arrives (left in the queue for media_task). Loops at end of file. */
 static void play_video(const char *path) {
-    if (!video_begin()) {
+    if (!ensure_decoders() || !video_begin()) {
         ui_message("Out of memory");
         return;
     }
@@ -1012,6 +1023,85 @@ static void play_video(const char *path) {
 
 /* ---------- task ---------- */
 
+/** Frame buffers + decoders, allocated by the media task on first use after a release. */
+static bool ensure_decoders(void) {
+    if (s_jpeg && s_png && s_frame[0] && s_frame[1]) {
+        return true;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (!s_frame[i]) {
+            s_frame[i] = (uint16_t *)psram_alloc((size_t)k_scr_w * k_scr_h * 2);
+        }
+    }
+    if (!s_jpeg) {
+        /* Internal RAM: JPEGDEC's tables are hit constantly while decoding (faster than PSRAM). */
+        void *jm = heap_caps_malloc(sizeof(JPEGDEC), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!jm) {
+            jm = psram_alloc(sizeof(JPEGDEC));
+        }
+        s_jpeg = jm ? new (jm) JPEGDEC() : nullptr;
+    }
+    if (!s_png) {
+        void *pm = psram_alloc(sizeof(PNG)); /* large (4096 px line buffer): PSRAM */
+        s_png = pm ? new (pm) PNG() : nullptr;
+    }
+    if (!s_jpeg || !s_png || !s_frame[0] || !s_frame[1]) {
+        serial_log("[media] out of memory");
+        return false;
+    }
+    serial_log("[media] buffers allocated (JPEGDEC %u B, PNG %u B)", (unsigned)sizeof(JPEGDEC),
+               (unsigned)sizeof(PNG));
+    return true;
+}
+
+/**
+ * Leaving the viewer: free everything big (frame buffers, decoders, read-ahead slots, frame index,
+ * the reader task). Runs on the media task, so nothing is mid-decode; the UI deletes the screen
+ * once s_released is set.
+ */
+static void media_release_buffers(void) {
+    if (s_reader) {
+        vTaskDelete(s_reader); /* idle: play_video() waited for it to close its file */
+        s_reader = nullptr;
+        vQueueDelete(s_free_q);
+        vQueueDelete(s_full_q);
+        vSemaphoreDelete(s_reader_done);
+        s_free_q = s_full_q = nullptr;
+        s_reader_done = nullptr;
+    }
+    auto release = [](void *p) {
+        if (p) {
+            heap_caps_free(p);
+        }
+    };
+    release(s_stream);
+    s_stream = nullptr;
+    for (int i = 0; i < k_slots; i++) {
+        release(s_slot_data[i]);
+        s_slot_data[i] = nullptr;
+    }
+    release(s_index);
+    s_index = nullptr;
+    release(s_scan_buf);
+    s_scan_buf = nullptr;
+    if (s_jpeg) {
+        s_jpeg->~JPEGDEC();
+        heap_caps_free(s_jpeg);
+        s_jpeg = nullptr;
+    }
+    if (s_png) {
+        s_png->~PNG();
+        heap_caps_free(s_png);
+        s_png = nullptr;
+    }
+    for (int i = 0; i < 2; i++) {
+        release(s_frame[i]);
+        s_frame[i] = nullptr;
+    }
+    s_released = true;
+    serial_log("[media] released buffers");
+}
+
 static void media_task(void *arg) {
     LV_UNUSED(arg);
     MediaCmd c;
@@ -1031,6 +1121,9 @@ static void media_task(void *arg) {
         case Cmd::PlayVideo:
             play_video(c.path);
             break;
+        case Cmd::Release:
+            media_release_buffers();
+            break;
         case Cmd::TogglePause:
         case Cmd::Seek:
         case Cmd::Stop:
@@ -1039,32 +1132,16 @@ static void media_task(void *arg) {
     }
 }
 
+/** The media task and its command queue live for the whole run (12 KB stack); buffers don't. */
 static bool media_begin(void) {
     if (s_task) {
         return true;
     }
-    for (int i = 0; i < 2; i++) {
-        s_frame[i] = (uint16_t *)psram_alloc((size_t)k_scr_w * k_scr_h * 2);
-    }
-    /* JPEGDEC in internal RAM: its tables are hit constantly while decoding (faster than PSRAM).
-     * PNG (large, with the 4096 px line buffer) goes to PSRAM. */
-    void *jm = heap_caps_malloc(sizeof(JPEGDEC), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!jm) {
-        jm = psram_alloc(sizeof(JPEGDEC));
-    }
-    void *pm = psram_alloc(sizeof(PNG));
-    if (!s_frame[0] || !s_frame[1] || !jm || !pm) {
-        serial_log("[media] out of memory");
-        return false;
-    }
-    s_jpeg = new (jm) JPEGDEC();
-    s_png = new (pm) PNG();
     s_queue = xQueueCreate(4, sizeof(MediaCmd));
     /* Core 1 at loop()'s priority (1): a higher one let back-to-back decoding starve loop() (WiFi
      * housekeeping). loop() sleeps 5 ms per pass, so decoding still gets nearly all of core 1. */
     xTaskCreatePinnedToCore(media_task, "media", 12288, nullptr, 1, &s_task, 1);
-    serial_log("[media] ready (JPEGDEC %u B, PNG %u B)", (unsigned)sizeof(JPEGDEC), (unsigned)sizeof(PNG));
-    return true;
+    return s_task != nullptr;
 }
 
 static void send(Cmd cmd, const char *path, int arg = 0) {
@@ -1143,11 +1220,34 @@ static void step_image(int delta) {
     show_image_at((s_image_i + n + delta) % n);
 }
 
+/** Once the media task has freed its buffers, delete the viewer screen (if not reopened). */
+static void reaper_cb(lv_timer_t *t) {
+    if (!s_released || lv_scr_act() == s_scr) {
+        return;
+    }
+    lv_timer_del(t);
+    s_reaper = nullptr;
+    lv_timer_del(s_hide_timer);
+    lv_obj_del(s_scr);
+    s_scr = s_img = s_overlay = s_title = s_info = s_msg = nullptr;
+    s_prev_btn = s_next_btn = s_bottom = s_play_btn = s_play_lbl = s_seek_bar = s_time_lbl = nullptr;
+    s_hide_timer = nullptr;
+    s_return_scr = nullptr;
+    s_images.clear();
+    s_images.shrink_to_fit();
+    serial_log("[media] viewer screen released");
+}
+
 static void back_cb(lv_event_t *e) {
     LV_UNUSED(e);
-    send(Cmd::Stop, nullptr);
+    /* Release = stop + free every buffer; the screen goes once that is done (reaper_cb). */
+    s_released = false;
+    send(Cmd::Release, nullptr);
     if (s_return_scr) {
         lv_scr_load(s_return_scr);
+    }
+    if (!s_reaper) {
+        s_reaper = lv_timer_create(reaper_cb, 100, nullptr);
     }
 }
 
@@ -1326,6 +1426,10 @@ static void build_screen(void) {
 }
 
 static void enter(bool video) {
+    if (s_reaper) { /* reopened before the old screen was released: keep using it */
+        lv_timer_del(s_reaper);
+        s_reaper = nullptr;
+    }
     build_screen();
     s_video_mode = video;
     if (lv_scr_act() != s_scr) {

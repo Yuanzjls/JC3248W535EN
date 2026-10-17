@@ -422,3 +422,19 @@ void files_ui_open(void) {
     show_dir(s_cwd); /* re-read: files may have changed since last time */
     lv_scr_load(s_scr);
 }
+
+void files_ui_release(void) {
+    lv_obj_t *act = lv_scr_act();
+    if (!s_scr || act == s_scr || act == s_view_scr) {
+        return;
+    }
+    if (s_view_scr) {
+        lv_obj_del(s_view_scr);
+    }
+    lv_obj_del(s_scr);
+    s_scr = s_bar = s_path_lbl = s_list = s_footer = s_up_btn = nullptr;
+    s_view_scr = s_view_bar = s_view_body = nullptr;
+    s_entries.clear();
+    s_entries.shrink_to_fit();
+    /* s_cwd stays: reopening shows the same folder. */
+}
