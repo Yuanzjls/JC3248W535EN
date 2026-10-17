@@ -95,8 +95,29 @@ static void load_ini(void) {
 }
 
 /** GET url into *out. Returns false (and sets status) on failure. */
-static bool http_get(const String &url, String *out) {
+/*
+ * JSON goes to PSRAM. The forecast is ~10 KB of JSON and thousands of small nodes; as a String
+ * body plus a default-allocated document it was a ~25 KB spike in internal RAM on every refresh
+ * (everything < 4 KB lands there), which together with BLE drove free internal RAM down to 2 KB.
+ */
+struct PsramJsonAllocator : ArduinoJson::Allocator {
+    void *allocate(size_t n) override {
+        return heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void *p) override {
+        heap_caps_free(p);
+    }
+    void *reallocate(void *p, size_t n) override {
+        return heap_caps_realloc_prefer(p, n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+};
+static PsramJsonAllocator s_json_alloc;
+
+/** GET url and parse the JSON straight from the socket (no body String). Sets status on failure. */
+static bool http_get_json(const String &url, JsonDocument &doc) {
     HTTPClient http;
+    http.useHTTP10(true); /* plain body, no chunked encoding: needed to parse from the stream */
     http.setTimeout(10000);
     http.setConnectTimeout(8000);
     if (!http.begin(url)) {
@@ -110,19 +131,23 @@ static bool http_get(const String &url, String *out) {
         set_status(code < 0 ? "Network error" : "Server error");
         return false;
     }
-    *out = http.getString();
+    const DeserializationError err = deserializeJson(doc, http.getStream());
     http.end();
+    if (err) {
+        serial_log("[weather] JSON error: %s", err.c_str());
+        set_status("Bad weather data");
+        return false;
+    }
     return true;
 }
 
 /** Fill lat/lon/name/units from ip-api.com when /weather.ini doesn't give coordinates. */
 static bool geolocate(void) {
-    String body;
-    if (!http_get("http://ip-api.com/json/?fields=status,countryCode,city,lat,lon", &body)) {
+    JsonDocument doc(&s_json_alloc);
+    if (!http_get_json("http://ip-api.com/json/?fields=status,countryCode,city,lat,lon", doc)) {
         return false;
     }
-    JsonDocument doc;
-    if (deserializeJson(doc, body) || strcmp(doc["status"] | "", "success") != 0) {
+    if (strcmp(doc["status"] | "", "success") != 0) {
         set_status("Location lookup failed");
         return false;
     }
@@ -154,15 +179,8 @@ static bool fetch_forecast(WeatherData *wd) {
         url += "&temperature_unit=fahrenheit&wind_speed_unit=mph";
     }
 
-    String body;
-    if (!http_get(url, &body)) {
-        return false;
-    }
-    JsonDocument doc;
-    const DeserializationError err = deserializeJson(doc, body);
-    if (err) {
-        serial_log("[weather] JSON error: %s", err.c_str());
-        set_status("Bad weather data");
+    JsonDocument doc(&s_json_alloc);
+    if (!http_get_json(url, doc)) {
         return false;
     }
 
@@ -257,7 +275,7 @@ void weather_begin(void) {
     }
     /* 10 KB: HTTPClient + JSON parsing; low priority so it never competes with the UI. */
     /* Core 1 (with Arduino loop): core 0 is busy with LVGL redraws and the WiFi stack. */
-    xTaskCreatePinnedToCore(weather_task, "weather", 10240, nullptr, 1, &s_task, 1);
+    xTaskCreatePinnedToCoreWithCaps(weather_task, "weather", 10240, nullptr, 1, &s_task, 1, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
 }
 
 void weather_refresh(void) {

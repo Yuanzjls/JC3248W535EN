@@ -755,7 +755,7 @@ static bool video_begin(void) {
     s_full_q = xQueueCreate(k_slots + 1, sizeof(uint8_t));
     s_reader_done = xSemaphoreCreateBinary();
     /* Core 0: LVGL is nearly idle there while the direct path plays; priority below LVGL. */
-    xTaskCreatePinnedToCore(reader_task, "media_rd", 6144, nullptr, 2, &s_reader, 0);
+    xTaskCreatePinnedToCoreWithCaps(reader_task, "media_rd", 6144, nullptr, 2, &s_reader, 0, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
     return true;
 }
 
@@ -1061,7 +1061,7 @@ static bool ensure_decoders(void) {
  */
 static void media_release_buffers(void) {
     if (s_reader) {
-        vTaskDelete(s_reader); /* idle: play_video() waited for it to close its file */
+        vTaskDeleteWithCaps(s_reader); /* idle: play_video() waited for it to close its file */
         s_reader = nullptr;
         vQueueDelete(s_free_q);
         vQueueDelete(s_full_q);
@@ -1140,7 +1140,7 @@ static bool media_begin(void) {
     s_queue = xQueueCreate(4, sizeof(MediaCmd));
     /* Core 1 at loop()'s priority (1): a higher one let back-to-back decoding starve loop() (WiFi
      * housekeeping). loop() sleeps 5 ms per pass, so decoding still gets nearly all of core 1. */
-    xTaskCreatePinnedToCore(media_task, "media", 12288, nullptr, 1, &s_task, 1);
+    xTaskCreatePinnedToCoreWithCaps(media_task, "media", 12288, nullptr, 1, &s_task, 1, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
     return s_task != nullptr;
 }
 

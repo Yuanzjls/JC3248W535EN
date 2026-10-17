@@ -60,10 +60,12 @@
     #endif
 
 #else       /*LV_MEM_CUSTOM*/
-    #define LV_MEM_CUSTOM_INCLUDE <stdlib.h>   /*Header for the dynamic memory function*/
-    #define LV_MEM_CUSTOM_ALLOC   malloc
-    #define LV_MEM_CUSTOM_FREE    free
-    #define LV_MEM_CUSTOM_REALLOC realloc
+    /* Prefer PSRAM: plain malloc puts every allocation < 4 KB (nearly all LVGL objects) in
+     * internal RAM, which WiFi, BLE and task stacks need. See include/lv_mem_psram.h. */
+    #define LV_MEM_CUSTOM_INCLUDE "lv_mem_psram.h"
+    #define LV_MEM_CUSTOM_ALLOC   lv_psram_malloc
+    #define LV_MEM_CUSTOM_FREE    lv_psram_free
+    #define LV_MEM_CUSTOM_REALLOC lv_psram_realloc
 #endif     /*LV_MEM_CUSTOM*/
 
 /*Number of the intermediate memory buffer used during rendering and other internal processing mechanisms.
