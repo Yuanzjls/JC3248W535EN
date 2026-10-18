@@ -242,13 +242,20 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
     bsp_lcd_tear_t *tear_ctx = NULL;
 
     ESP_LOGI(TAG, "Initialize SPI bus");
-    const spi_bus_config_t buscfg = AXS15231B_PANEL_BUS_QSPI_CONFIG(
-                                        EXAMPLE_PIN_NUM_QSPI_PCLK,
-                                        EXAMPLE_PIN_NUM_QSPI_DATA0,
-                                        EXAMPLE_PIN_NUM_QSPI_DATA1,
-                                        EXAMPLE_PIN_NUM_QSPI_DATA2,
-                                        EXAMPLE_PIN_NUM_QSPI_DATA3,
-                                        config->max_transfer_sz);
+    spi_bus_config_t buscfg = AXS15231B_PANEL_BUS_QSPI_CONFIG(
+                                  EXAMPLE_PIN_NUM_QSPI_PCLK,
+                                  EXAMPLE_PIN_NUM_QSPI_DATA0,
+                                  EXAMPLE_PIN_NUM_QSPI_DATA1,
+                                  EXAMPLE_PIN_NUM_QSPI_DATA2,
+                                  EXAMPLE_PIN_NUM_QSPI_DATA3,
+                                  config->max_transfer_sz);
+    /*
+     * SPI interrupt on core 0, where every task that sends frames runs (LVGL task, video show
+     * task). On the default core - the one calling this, core 1 (setup) - interrupt and senders
+     * were on different cores; suspected cause of the occasional full UI freeze, where a sender
+     * waits forever in spi_device_acquire_bus() (spi_bus_lock dev_wait) holding the display lock.
+     */
+    buscfg.isr_cpu_id = ESP_INTR_CPU_AFFINITY_0;
     ESP_ERROR_CHECK(spi_bus_initialize(EXAMPLE_LCD_QSPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     ESP_LOGI(TAG, "Install panel IO");

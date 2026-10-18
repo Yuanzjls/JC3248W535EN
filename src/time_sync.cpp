@@ -7,6 +7,7 @@
 #include "serial_log.h"
 
 static bool s_ntp_configured = false;
+static bool s_sntp_started = false; /* once per boot: SNTP keeps running across reconnects */
 static bool s_synced = false;
 
 void time_sync_on_wifi_connected(void) {
@@ -18,6 +19,19 @@ void time_sync_on_wifi_connected(void) {
     }
     s_ntp_configured = true;
     s_synced = false;
+    if (s_sntp_started) {
+        return; /* still running from the first connect; it retries on its own */
+    }
+    s_sntp_started = true;
+    /*
+     * Arduino bug workaround: the first hostByName() after the IP state changes calls
+     * dns_clear_cache() without the lwIP core lock. If SNTP's own DNS lookup is pending then,
+     * its callback runs in the caller's task and asserts ("Required to lock TCPIP core
+     * functionality", seen in the weather task right after boot). So make that first lookup
+     * here, before SNTP exists. Goes away with esp_sntp / esp_http_client (migration step 5).
+     */
+    IPAddress ntp_ip;
+    (void)WiFi.hostByName("pool.ntp.org", ntp_ip);
     /*
      * configTime(0, 0, ...) would overwrite TZ with "UTC0" and wipe the timezone restored from SD.
      * configTzTime re-applies the current TZ instead. Copy it first: setenv may free the old string.
