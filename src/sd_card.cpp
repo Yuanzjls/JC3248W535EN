@@ -17,6 +17,7 @@
 #include <vfs_api.h>
 
 #include "serial_log.h"
+#include "platform_time.h"
 
 /* Board wiring (JC3248W535EN): SD card on its own SPI bus. The display uses SPI2. */
 static const spi_host_device_t k_host = SPI3_HOST;
@@ -84,9 +85,9 @@ static void sd_unstick(void) {
     b.length = 8;
     b.flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA;
     b.tx_data[0] = 0xFF;
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     int idle = 0;
-    while (idle < 8 && millis() - t0 < 500) {
+    while (idle < 8 && now_ms() - t0 < 500) {
         spi_device_polling_transmit(h, &b);
         idle = (b.rx_data[0] == 0xFF) ? idle + 1 : 0;
     }
@@ -147,7 +148,7 @@ static bool try_sdmmc(void) {
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < 2; attempt++) {
         if (attempt > 0) {
-            delay(200);
+            sleep_ms(200);
         }
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         host.flags = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG;
@@ -207,7 +208,7 @@ static bool try_sdspi(int *freq_khz_out) {
             serial_log("[sd] mount failed (%s), recovering card (attempt %d/%d)", esp_err_to_name(err), attempt + 1,
                        k_attempts);
             sd_unstick();
-            delay(k_pause_ms[attempt]);
+            sleep_ms(k_pause_ms[attempt]);
         }
         sdmmc_host_t host = SDSPI_HOST_DEFAULT();
         host.slot = k_host;

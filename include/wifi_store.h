@@ -1,9 +1,9 @@
 #pragma once
 
-#include <Arduino.h>
+#include <string>
 
 /**
- * Load known networks from SD (call after SD.begin). Safe if SD missing or file absent.
+ * Load known networks from SD (call after the SD card is mounted). Safe if SD missing or file absent.
  */
 void wifi_store_begin(void);
 
@@ -14,15 +14,15 @@ bool wifi_store_has_entries(void);
  * If password for this UTF-8 SSID was saved, copy to *out_pass and return true.
  * Open networks are stored with an empty password string.
  */
-bool wifi_store_find_password(const String &ssid, String *out_pass);
+bool wifi_store_find_password(const char *ssid, std::string *out_pass);
 
 /**
  * Save or update credentials and move this SSID to the front (tried first on next boot).
  */
-void wifi_store_save(const String &ssid, const String &password);
+void wifi_store_save(const char *ssid, const char *password);
 
 /** Move an existing entry to the front after a successful connect (password unchanged). */
-void wifi_store_promote(const String &ssid);
+void wifi_store_promote(const char *ssid);
 
 /**
  * Start trying saved networks in order (first = most recently saved). Non-blocking; call

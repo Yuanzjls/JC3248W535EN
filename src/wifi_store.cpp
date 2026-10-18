@@ -1,129 +1,102 @@
 #include "wifi_store.h"
 
-#include "sd_card.h"
 #include <algorithm>
 #include <string.h>
+#include <utility>
 #include <vector>
-#include <Arduino.h>
 
+#include "platform_time.h"
+#include "sd_text.h"
+#include "serial_log.h"
 #include "wifi_net.h"
 
-#include "serial_log.h"
-
+/*
+ * /wifi_known.txt on SD: "KCWF1", then two lines per network - SSID and password, each
+ * hex-encoded (UTF-8 SSIDs and any password bytes survive). Most recently used first.
+ */
 static const char *k_file = "/wifi_known.txt";
 static const char *k_magic = "KCWF1";
 static const size_t k_max_entries = 16;
 
-static std::vector<std::pair<String, String>> s_known;
+static std::vector<std::pair<std::string, std::string>> s_known;
 static bool s_loaded = false;
 
-static uint8_t hex_val(char c) {
+static int hex_val(char c) {
     if (c >= '0' && c <= '9') {
-        return (uint8_t)(c - '0');
+        return c - '0';
     }
     if (c >= 'a' && c <= 'f') {
-        return (uint8_t)(10 + c - 'a');
+        return 10 + c - 'a';
     }
     if (c >= 'A' && c <= 'F') {
-        return (uint8_t)(10 + c - 'A');
+        return 10 + c - 'A';
     }
-    return 0xFF;
+    return -1;
 }
 
-static String hex_encode_bytes(const String &s) {
+static std::string hex_encode(const std::string &s) {
     static const char *h = "0123456789abcdef";
-    const uint8_t *p = (const uint8_t *)s.c_str();
-    const size_t n = s.length();
-    String o;
-    o.reserve(n * 2);
-    for (size_t i = 0; i < n; i++) {
-        o += h[p[i] >> 4];
-        o += h[p[i] & 0x0F];
+    std::string o;
+    o.reserve(s.size() * 2);
+    for (unsigned char c : s) {
+        o += h[c >> 4];
+        o += h[c & 0x0F];
     }
     return o;
 }
 
-static String hex_decode_to_string(const String &hex) {
-    if (hex.length() % 2) {
-        return String();
+/** Empty on malformed input. */
+static std::string hex_decode(const std::string &hex) {
+    if (hex.size() % 2) {
+        return std::string();
     }
-    const size_t n = hex.length() / 2;
-    String o;
-    o.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-        const uint8_t hi = hex_val(hex[i * 2]);
-        const uint8_t lo = hex_val(hex[i * 2 + 1]);
-        if (hi > 15 || lo > 15) {
-            return String();
+    std::string o;
+    o.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        const int hi = hex_val(hex[i]);
+        const int lo = hex_val(hex[i + 1]);
+        if (hi < 0 || lo < 0) {
+            return std::string();
         }
         o += (char)((hi << 4) | lo);
     }
     return o;
 }
 
-static void trim_crlf(String &s) {
-    s.trim();
-    while (s.length() && (s.endsWith("\r") || s.endsWith("\n"))) {
-        s.remove(s.length() - 1);
-    }
-}
-
-static bool read_line_trim(File &f, String &out) {
-    if (!f.available()) {
-        return false;
-    }
-    out = f.readStringUntil('\n');
-    trim_crlf(out);
-    return true;
-}
-
 static void load_from_sd(void) {
     s_known.clear();
-    File f = sd_fs().open(k_file, FILE_READ);
-    if (!f) {
+    std::string content;
+    if (!sd_read_text(k_file, &content)) {
         serial_log("[wifi_store] %s not found on SD", k_file);
         return;
     }
-    String line;
-    if (!read_line_trim(f, line) || line != k_magic) {
+    std::vector<std::string> lines;
+    for_each_line(content, [&](const std::string &l) { lines.push_back(str_trim(l)); });
+    if (lines.empty() || lines[0] != k_magic) {
         serial_log("[wifi_store] %s bad header", k_file);
-        f.close();
         return;
     }
-    while (f.available()) {
-        String ssid_hex;
-        if (!read_line_trim(f, ssid_hex) || ssid_hex.length() == 0) {
+    for (size_t i = 1; i < lines.size() && s_known.size() < k_max_entries; i += 2) {
+        if (lines[i].empty()) {
             break;
         }
-        String pass_hex;
-        if (f.available()) {
-            (void)read_line_trim(f, pass_hex);
-        }
-        const String ssid = hex_decode_to_string(ssid_hex);
-        const String pass = hex_decode_to_string(pass_hex);
-        if (ssid.length() == 0) {
-            continue;
-        }
-        s_known.push_back({ssid, pass});
-        if (s_known.size() >= k_max_entries) {
-            break;
+        const std::string ssid = hex_decode(lines[i]);
+        const std::string pass = (i + 1 < lines.size()) ? hex_decode(lines[i + 1]) : std::string();
+        if (!ssid.empty()) {
+            s_known.push_back({ssid, pass});
         }
     }
-    f.close();
 }
 
 static bool write_to_sd(void) {
-    File f = sd_fs().open(k_file, FILE_WRITE);
-    if (!f) {
+    std::string text = std::string(k_magic) + "\n";
+    for (const auto &p : s_known) {
+        text += hex_encode(p.first) + "\n" + hex_encode(p.second) + "\n";
+    }
+    if (!sd_write_text(k_file, text)) {
         serial_log("[wifi_store] cannot write %s", k_file);
         return false;
     }
-    f.println(k_magic);
-    for (const auto &p : s_known) {
-        f.println(hex_encode_bytes(p.first));
-        f.println(hex_encode_bytes(p.second));
-    }
-    f.close();
     serial_log("[wifi_store] saved %u network(s) to %s", (unsigned)s_known.size(), k_file);
     return true;
 }
@@ -144,7 +117,7 @@ bool wifi_store_has_entries(void) {
     return !s_known.empty();
 }
 
-bool wifi_store_find_password(const String &ssid, String *out_pass) {
+bool wifi_store_find_password(const char *ssid, std::string *out_pass) {
     if (!s_loaded) {
         wifi_store_begin();
     }
@@ -157,41 +130,35 @@ bool wifi_store_find_password(const String &ssid, String *out_pass) {
     return false;
 }
 
-void wifi_store_save(const String &ssid, const String &password) {
+void wifi_store_save(const char *ssid, const char *password) {
     if (!s_loaded) {
         wifi_store_begin();
     }
-    std::vector<std::pair<String, String>> next;
+    std::vector<std::pair<std::string, std::string>> next;
     next.reserve(s_known.size() + 1);
     next.push_back({ssid, password});
     for (const auto &p : s_known) {
-        if (p.first != ssid) {
-            next.push_back(p);
-        }
         if (next.size() >= k_max_entries) {
             break;
+        }
+        if (p.first != ssid) {
+            next.push_back(p);
         }
     }
     s_known = std::move(next);
     (void)write_to_sd();
 }
 
-void wifi_store_promote(const String &ssid) {
+void wifi_store_promote(const char *ssid) {
     if (!s_loaded) {
         wifi_store_begin();
     }
-    size_t idx = s_known.size();
-    for (size_t i = 0; i < s_known.size(); i++) {
-        if (s_known[i].first == ssid) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx >= s_known.size()) {
+    auto it = std::find_if(s_known.begin(), s_known.end(), [&](const auto &p) { return p.first == ssid; });
+    if (it == s_known.end()) {
         return;
     }
-    const auto ent = s_known[idx];
-    s_known.erase(s_known.begin() + (ptrdiff_t)idx);
+    const auto ent = *it;
+    s_known.erase(it);
     s_known.insert(s_known.begin(), ent);
     (void)write_to_sd();
 }
@@ -263,7 +230,7 @@ static void begin_candidate(void) {
                (unsigned)s_ac_list.size(), c.seen ? "" : " - not in scan, trying anyway");
     (void)wifi_net_connect(net.first.c_str(), net.second.c_str(), c.seen ? c.channel : 0, c.seen ? c.bssid : nullptr);
     s_ac_state = AcState::Connecting;
-    s_ac_deadline = millis() + k_ac_timeout_ms;
+    s_ac_deadline = now_ms() + k_ac_timeout_ms;
 }
 
 bool wifi_store_autoconnect_start(void) {
@@ -275,12 +242,12 @@ bool wifi_store_autoconnect_start(void) {
     }
     wifi_net_disconnect(); /* association only: the radio stays on */
     s_ac_i = 0;
-    s_ac_scan_start = millis();
+    s_ac_scan_start = now_ms();
     if (!wifi_net_scan_start(false /*hidden*/, 120 /*ms/channel*/)) {
         serial_log("[wifi] scan failed, trying saved networks in order");
         build_candidates();
         s_ac_state = AcState::Settling;
-        s_ac_deadline = millis() + k_ac_settle_ms;
+        s_ac_deadline = now_ms() + k_ac_settle_ms;
     } else {
         serial_log("[wifi] scanning for saved networks...");
         s_ac_state = AcState::Scanning;
@@ -295,10 +262,10 @@ bool wifi_store_autoconnect_poll(void) {
 
     case AcState::Scanning: {
         const int n = wifi_net_scan_poll();
-        if (n == -1 && millis() - s_ac_scan_start < k_ac_scan_timeout_ms) {
+        if (n == -1 && now_ms() - s_ac_scan_start < k_ac_scan_timeout_ms) {
             return true;
         }
-        serial_log("[wifi] scan done in %lu ms, %d AP(s)", (unsigned long)(millis() - s_ac_scan_start), n);
+        serial_log("[wifi] scan done in %lu ms, %d AP(s)", (unsigned long)(now_ms() - s_ac_scan_start), n);
         build_candidates();
         begin_candidate();
         return true;
@@ -309,7 +276,7 @@ bool wifi_store_autoconnect_poll(void) {
             s_ac_state = AcState::Idle;
             return false;
         }
-        if ((int32_t)(millis() - s_ac_deadline) < 0) {
+        if ((int32_t)(now_ms() - s_ac_deadline) < 0) {
             return true;
         }
         serial_log("[wifi] no luck after %lu s", (unsigned long)(k_ac_timeout_ms / 1000));
@@ -319,11 +286,11 @@ bool wifi_store_autoconnect_poll(void) {
             return false;
         }
         s_ac_state = AcState::Settling;
-        s_ac_deadline = millis() + k_ac_settle_ms;
+        s_ac_deadline = now_ms() + k_ac_settle_ms;
         return true;
 
     case AcState::Settling:
-        if ((int32_t)(millis() - s_ac_deadline) < 0) {
+        if ((int32_t)(now_ms() - s_ac_deadline) < 0) {
             return true;
         }
         begin_candidate();

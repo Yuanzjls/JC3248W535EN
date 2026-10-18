@@ -10,6 +10,7 @@
 
 #include "media_ui.h"
 #include "serial_log.h"
+#include "platform_time.h"
 #include "status_bar.h"
 #include "ui_font.h"
 #include "ui_theme.h"
@@ -317,7 +318,7 @@ static void update_footer(void) {
 }
 
 static void show_dir(const String &path) {
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     s_entries.clear();
     size_t skipped = 0;
 
@@ -378,7 +379,7 @@ static void show_dir(const String &path) {
     }
     update_footer();
     serial_log("[files] %s: %u entries in %lu ms", s_cwd.c_str(), (unsigned)s_entries.size(),
-               (unsigned long)(millis() - t0));
+               (unsigned long)(now_ms() - t0));
 }
 
 static void build_screen(void) {

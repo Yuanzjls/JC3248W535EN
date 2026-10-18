@@ -20,6 +20,7 @@
 #include "esp_bsp.h"
 #include "lv_port.h"
 #include "serial_log.h"
+#include "platform_time.h"
 #include "ui_font.h"
 #include "ui_theme.h"
 
@@ -248,7 +249,7 @@ static bool decode_jpeg_still(uint8_t *data, size_t len, char *info, size_t info
     JpegTarget t = {tmp, tw, tw, th};
     s_jpeg->setPixelType(RGB565_BIG_ENDIAN);
     s_jpeg->setUserPointer(&t);
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     const int ok = s_jpeg->decode(0, 0, progressive ? 0 : jpeg_option(s));
     s_jpeg->close();
     if (!ok) {
@@ -262,7 +263,7 @@ static bool decode_jpeg_still(uint8_t *data, size_t len, char *info, size_t info
     heap_caps_free(tmp);
     present(fw, fh);
     snprintf(info, info_n, "%dx%d JPEG%s  -  %lu ms", w, h, progressive ? " (progressive: preview quality)" : "",
-             (unsigned long)(millis() - t0));
+             (unsigned long)(now_ms() - t0));
     return true;
 }
 
@@ -315,7 +316,7 @@ static bool decode_png(uint8_t *data, size_t len, char *info, size_t info_n) {
         snprintf(info, info_n, "Out of memory");
         return false;
     }
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     const int rc = s_png->decode(&t, 0);
     s_png->close();
     heap_caps_free(t.line);
@@ -324,7 +325,7 @@ static bool decode_png(uint8_t *data, size_t len, char *info, size_t info_n) {
         return false;
     }
     present(t.dw, t.dh);
-    snprintf(info, info_n, "%dx%d PNG  -  %lu ms", w, h, (unsigned long)(millis() - t0));
+    snprintf(info, info_n, "%dx%d PNG  -  %lu ms", w, h, (unsigned long)(now_ms() - t0));
     return true;
 }
 
@@ -408,10 +409,10 @@ static void show_still(const char *path) {
         ui_message("Out of memory");
         return;
     }
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     const size_t got = sd_read(f, data, len);
     f.close();
-    const uint32_t t_read = millis() - t0;
+    const uint32_t t_read = now_ms() - t0;
 
     const String p(path);
     bool ok = false;
@@ -586,7 +587,7 @@ static void index_begin(const char *video, uint32_t file_size) {
     s_scan_off = 0;
     s_scan_prev_ff = false;
     s_scan_active = (bool)s_scan_f;
-    s_scan_t0 = millis();
+    s_scan_t0 = now_ms();
 }
 
 static void index_end(void) {
@@ -621,7 +622,7 @@ static bool index_scan_step(const char *video, uint32_t file_size) {
             s_index_done = true; /* after every offset is written: the player may now use them */
             index_save(video, file_size);
             serial_log("[media] indexed %lu frames in %lu s", (unsigned long)s_index_count,
-                       (unsigned long)((millis() - s_scan_t0) / 1000));
+                       (unsigned long)((now_ms() - s_scan_t0) / 1000));
         }
         return false;
     }
@@ -670,9 +671,9 @@ static void reader_task(void *arg) {
                         end = 0;
                     }
                     const size_t want = (k_stream_buf - end) < k_read_chunk ? (k_stream_buf - end) : k_read_chunk;
-                    const uint32_t t0 = millis();
+                    const uint32_t t0 = now_ms();
                     const size_t n = sd_read(f, s_stream + end, want);
-                    s_read_ms += millis() - t0;
+                    s_read_ms += now_ms() - t0;
                     s_read_bytes += n;
                     /* Same watchdog rule as indexing: if the card is the bottleneck this loop never
                      * waits on a queue, so give the core-0 idle task a moment after every chunk. */
@@ -812,7 +813,7 @@ static bool show_video_frame(int fb) {
 static void show_task(void *arg) {
     LV_UNUSED(arg);
     int held = -1; /* buffer LVGL may still read (overlay path) */
-    uint32_t next_due = millis();
+    uint32_t next_due = now_ms();
     for (;;) {
         uint8_t fb;
         if (xQueueReceive(s_fb_show_q, &fb, portMAX_DELAY) != pdTRUE) {
@@ -824,18 +825,18 @@ static void show_task(void *arg) {
                 xQueueSend(s_fb_free_q, &h, 0);
                 held = -1;
             }
-            next_due = millis();
+            next_due = now_ms();
             continue;
         }
-        const int32_t wait = (int32_t)(next_due - millis());
+        const int32_t wait = (int32_t)(next_due - now_ms());
         if (wait > 0) {
             vTaskDelay(pdMS_TO_TICKS(wait));
         }
-        next_due = millis() + s_frame_ms;
-        const uint32_t t0 = millis();
+        next_due = now_ms() + s_frame_ms;
+        const uint32_t t0 = now_ms();
         const bool via_lvgl = show_video_frame(fb);
         s_last_fb = fb;
-        s_show_ms = s_show_ms + (millis() - t0);
+        s_show_ms = s_show_ms + (now_ms() - t0);
         s_shown = s_shown + 1;
         if (held >= 0) { /* replaced on screen: free again */
             const uint8_t h = (uint8_t)held;
@@ -930,7 +931,7 @@ static void play_video(const char *path) {
     bool paused = false, first = true;
     bool show_one = false; /* paused + seek: still show the frame at the new position */
     uint32_t decoded = 0, decode_ms = 0, frame_bytes = 0, starved = 0;
-    uint32_t stat_t0 = millis(), log_t0 = millis(), progress_t0 = 0;
+    uint32_t stat_t0 = now_ms(), log_t0 = now_ms(), progress_t0 = 0;
     /*
      * Time display. Raw MJPEG has no timestamps, so:
      *  - elapsed counts the frames actually played (exact, always moves forward); only a seek
@@ -1025,7 +1026,7 @@ static void play_video(const char *path) {
             continue;
         }
 
-        const uint32_t t0 = millis();
+        const uint32_t t0 = now_ms();
         int ok = 0;
         if (use_njpeg) {
             /* Full-screen frames: Espressif's SIMD decoder, straight into the frame buffer. */
@@ -1044,8 +1045,8 @@ static void play_video(const char *path) {
             ok = err == JPEG_ERR_OK;
             if (!ok) {
                 static uint32_t s_fail_log_ms = 0;
-                if (millis() - s_fail_log_ms > 2000) { /* never silent: a failing decoder looked like low fps */
-                    s_fail_log_ms = millis();
+                if (now_ms() - s_fail_log_ms > 2000) { /* never silent: a failing decoder looked like low fps */
+                    s_fail_log_ms = now_ms();
                     serial_log("[media] frame decode failed (esp_new_jpeg error %d, %dx%d)", (int)err, hi.width, hi.height);
                 }
             }
@@ -1084,7 +1085,7 @@ static void play_video(const char *path) {
         }
         frame_bytes += s_slot_len[slot];
         xQueueSend(s_free_q, &slot, 0); /* data consumed: let the reader refill it */
-        decode_ms += millis() - t0;
+        decode_ms += now_ms() - t0;
         if (!ok) {
             xQueueSend(s_fb_free_q, &fb, 0);
             continue; /* corrupt frame: skip */
@@ -1097,7 +1098,7 @@ static void play_video(const char *path) {
         xQueueSend(s_fb_show_q, &fb, portMAX_DELAY); /* show task paces and sends it */
         show_one = false;
 
-        const uint32_t now = millis();
+        const uint32_t now = now_ms();
         /* Progress: only drawn with the controls up (direct-to-panel frames would hide it anyway). */
         if (s_overlay_on && (progress_t0 == 0 || now - progress_t0 >= 250)) {
             progress_t0 = now;

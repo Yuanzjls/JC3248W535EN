@@ -4,6 +4,7 @@
 #include "sd_card.h"
 #include <lvgl.h>
 #include "serial_log.h"
+#include "platform_time.h"
 
 /** Must match include/lv_conf.h LV_FS_POSIX_PATH and Arduino SD mount point */
 static const char *k_sd_mount = "/sd";
@@ -176,7 +177,7 @@ static void mem_drv_register(void) {
 
 /** Read the whole font file into PSRAM and parse it from there. Returns nullptr on any failure. */
 static lv_font_t *load_font_via_psram(const char *arduino_path) {
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
     File f = sd_fs().open(arduino_path, FILE_READ);
     if (!f) {
         return nullptr;
@@ -198,7 +199,7 @@ static lv_font_t *load_font_via_psram(const char *arduino_path) {
         got += n;
     }
     f.close();
-    const uint32_t t_read = millis() - t0;
+    const uint32_t t_read = now_ms() - t0;
     if (got != len) {
         serial_log("[ui_font] short read %lu/%lu bytes", (unsigned long)got, (unsigned long)len);
         heap_caps_free(buf);
@@ -208,10 +209,10 @@ static lv_font_t *load_font_via_psram(const char *arduino_path) {
     mem_drv_register();
     s_mem_buf = buf;
     s_mem_len = len;
-    const uint32_t t1 = millis();
+    const uint32_t t1 = now_ms();
     lv_font_t *font = lv_font_load("M:font");
     serial_log("[ui_font] PSRAM path: SD read %lu ms (%lu KB/s), parse %lu ms", (unsigned long)t_read,
-               (unsigned long)(t_read ? len / t_read : 0), (unsigned long)(millis() - t1));
+               (unsigned long)(t_read ? len / t_read : 0), (unsigned long)(now_ms() - t1));
 
     /* lv_font_load copies everything it needs; the raw file buffer can go. */
     s_mem_buf = nullptr;
@@ -227,7 +228,7 @@ bool ui_font_load_from_sd(void) {
     }
     serial_log("[ui_font] font: loading from SD ...");
     font_load_diagnose();
-    const uint32_t free_heap = ESP.getFreeHeap();
+    const uint32_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     serial_log("[ui_font] diag: free heap=%lu", (unsigned long)free_heap);
 
     if (!s_path_lvgl) {

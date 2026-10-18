@@ -1,4 +1,5 @@
 #include "app_settings.h"
+#include "platform_time.h"
 
 #include <Arduino.h>
 #include "wifi_net.h"
@@ -144,7 +145,7 @@ static void sync_from_state(void) {
     } else {
         about += "not connected";
     }
-    about += "\nUptime  " + String(millis() / 60000UL) + " min";
+    about += "\nUptime  " + String(now_ms() / 60000UL) + " min";
     about += "\nBuild  " __DATE__ " " __TIME__;
     lv_label_set_text(s_about, about.c_str());
 }

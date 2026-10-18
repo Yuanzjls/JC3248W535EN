@@ -3,7 +3,10 @@
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <esp_http_client.h>
-#include "sd_card.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include "sd_text.h"
 #include "wifi_net.h"
 
 #include "esp_bsp.h"
@@ -28,7 +31,7 @@ struct WeatherConfig {
     bool have_coords;
     float lat;
     float lon;
-    String name;
+    std::string name;
     int units; /* -1 = auto, 0 = celsius, 1 = fahrenheit */
 };
 
@@ -45,51 +48,25 @@ static void set_status(const char *s) {
 }
 
 static void load_ini(void) {
-    File f = sd_fs().open(k_ini_path, FILE_READ);
-    if (!f) {
+    std::string content;
+    if (!sd_read_text(k_ini_path, &content)) {
         serial_log("[weather] %s not found, using IP geolocation", k_ini_path);
         return;
     }
-    const String content = f.readString();
-    f.close();
-
     bool have_lat = false, have_lon = false;
-    int start = 0;
-    while (start < (int)content.length()) {
-        int nl = content.indexOf('\n', start);
-        if (nl < 0) {
-            nl = content.length();
-        }
-        String line = content.substring(start, nl);
-        start = nl + 1;
-        line.trim();
-        if (line.length() == 0 || line.charAt(0) == ';' || line.charAt(0) == '[') {
-            continue;
-        }
-        const int eq = line.indexOf('=');
-        if (eq < 0) {
-            continue;
-        }
-        String key = line.substring(0, eq);
-        String val = line.substring(eq + 1);
-        const int semi = val.indexOf(';');
-        if (semi >= 0) {
-            val = val.substring(0, semi);
-        }
-        key.trim();
-        val.trim();
+    ini_parse(content, [&](const std::string &, const std::string &key, const std::string &val) {
         if (key == "lat") {
-            s_cfg.lat = val.toFloat();
+            s_cfg.lat = strtof(val.c_str(), nullptr);
             have_lat = true;
         } else if (key == "lon") {
-            s_cfg.lon = val.toFloat();
+            s_cfg.lon = strtof(val.c_str(), nullptr);
             have_lon = true;
         } else if (key == "name") {
             s_cfg.name = val;
         } else if (key == "units") {
-            s_cfg.units = val.equalsIgnoreCase("fahrenheit") ? 1 : val.equalsIgnoreCase("celsius") ? 0 : -1;
+            s_cfg.units = str_ieq(val, "fahrenheit") ? 1 : str_ieq(val, "celsius") ? 0 : -1;
         }
-    }
+    });
     s_cfg.have_coords = have_lat && have_lon;
     serial_log("[weather] %s: coords=%s name=\"%s\" units=%d", k_ini_path, s_cfg.have_coords ? "yes" : "no",
                s_cfg.name.c_str(), s_cfg.units);
@@ -152,9 +129,9 @@ struct HttpBodyReader {
 };
 
 /** GET url and parse the JSON straight from the socket (no body buffer). Sets status on failure. */
-static bool http_get_json(const String &url, JsonDocument &doc) {
+static bool http_get_json(const char *url, JsonDocument &doc) {
     esp_http_client_config_t cfg = {};
-    cfg.url = url.c_str();
+    cfg.url = url;
     cfg.timeout_ms = 10000;
     cfg.buffer_size_tx = 1024; /* the forecast URL is ~350 characters */
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -165,13 +142,13 @@ static bool http_get_json(const String &url, JsonDocument &doc) {
     bool ok = false;
     const esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        serial_log("[weather] GET %s -> %s", url.c_str(), esp_err_to_name(err));
+        serial_log("[weather] GET %s -> %s", url, esp_err_to_name(err));
         set_status("Network error");
     } else {
         (void)esp_http_client_fetch_headers(client);
         const int code = esp_http_client_get_status_code(client);
         if (code != 200) {
-            serial_log("[weather] GET %s -> HTTP %d", url.c_str(), code);
+            serial_log("[weather] GET %s -> HTTP %d", url, code);
             set_status("Server error");
         } else {
             HttpBodyReader reader;
@@ -217,16 +194,15 @@ static bool fetch_forecast(WeatherData *wd) {
     /* Settings app choice wins; "Auto" falls back to /weather.ini or the IP country. */
     const TempUnits pref = settings_get().units;
     const bool fahrenheit = pref == TempUnits::Fahrenheit || (pref == TempUnits::Auto && s_cfg.units == 1);
-    String url = "http://api.open-meteo.com/v1/forecast?latitude=" + String(s_cfg.lat, 4) +
-                 "&longitude=" + String(s_cfg.lon, 4) +
-                 "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"
-                 "&hourly=temperature_2m,weather_code,precipitation_probability,is_day"
-                 "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                 "&timezone=auto&forecast_days=" +
-                 String(k_weather_days);
-    if (fahrenheit) {
-        url += "&temperature_unit=fahrenheit&wind_speed_unit=mph";
-    }
+    char url[512];
+    snprintf(url, sizeof(url),
+             "http://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+             "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m"
+             "&hourly=temperature_2m,weather_code,precipitation_probability,is_day"
+             "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+             "&timezone=auto&forecast_days=%d%s",
+             s_cfg.lat, s_cfg.lon, (int)k_weather_days,
+             fahrenheit ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "");
 
     JsonDocument doc(&s_json_alloc);
     if (!http_get_json(url, doc)) {

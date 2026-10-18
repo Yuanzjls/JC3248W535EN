@@ -3,6 +3,7 @@
 #include <lvgl.h>
 #include "display.h"
 #include "serial_log.h"
+#include "platform_time.h"
 #include "esp_bsp.h"
 #include "lv_port.h"
 #include "ui_font.h"
@@ -70,7 +71,7 @@ static void disp_monitor_cb(lv_disp_drv_t *drv, uint32_t time_ms, uint32_t px)
   if (time_ms > s_rf_max_ms) {
     s_rf_max_ms = time_ms;
   }
-  const uint32_t now = millis();
+  const uint32_t now = now_ms();
   const uint32_t window = now - s_rf_window_start;
   if (window < 5000) {
     return;
@@ -88,14 +89,14 @@ static void disp_monitor_cb(lv_disp_drv_t *drv, uint32_t time_ms, uint32_t px)
 #define BOOT_STEP(name, expr)                                                                    \
   do {                                                                                           \
     serial_log("[boot] %s ...", name);                                                           \
-    const uint32_t _t = millis();                                                                \
+    const uint32_t _t = now_ms();                                                                \
     expr;                                                                                        \
-    serial_log("[boot] %s done in %lu ms", name, (unsigned long)(millis() - _t));               \
+    serial_log("[boot] %s done in %lu ms", name, (unsigned long)(now_ms() - _t));               \
   } while (0)
 
 void setup()
 {
-  s_boot_t0 = millis();
+  s_boot_t0 = now_ms();
   serial_log_init();
   serial_log("[app] boot: starting (reset reason %d: %s)", (int)esp_reset_reason(), reset_reason_str(esp_reset_reason()));
 
@@ -148,8 +149,8 @@ void setup()
   weather_begin();
   airthings_begin(); /* BLE radon sensor, if one was chosen (/airthings.ini) */
 
-  serial_log("[boot] setup done in %lu ms total (free heap %lu, free PSRAM %lu)", (unsigned long)(millis() - s_boot_t0),
-             (unsigned long)ESP.getFreeHeap(), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  serial_log("[boot] setup done in %lu ms total (free heap %lu, free PSRAM %lu)", (unsigned long)(now_ms() - s_boot_t0),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   lvgl_port_enable_stall_report(); /* boot held the display lock for seconds: not a stall */
 }
 
@@ -157,9 +158,9 @@ void setup()
 static const uint32_t k_slow_step_ms = 200;
 #define LOOP_STEP(name, expr)                                                                    \
   do {                                                                                           \
-    const uint32_t _t = millis();                                                                \
+    const uint32_t _t = now_ms();                                                                \
     expr;                                                                                        \
-    const uint32_t _d = millis() - _t;                                                           \
+    const uint32_t _d = now_ms() - _t;                                                           \
     if (_d > k_slow_step_ms) {                                                                   \
       serial_log("[loop] SLOW: %s blocked %lu ms", name, (unsigned long)_d);                    \
     }                                                                                            \
@@ -196,13 +197,13 @@ static void ui_watchdog_task(void *arg)
       static bool s_dumped;
       if (!s_dumped) {
         s_dumped = true;
-        delay(100);
+        sleep_ms(100);
         esp_backtrace_print_all_tasks(16);
       }
     }
     if (stuck_ms >= k_restart_ms) {
       serial_log("[ui] WATCHDOG: UI frozen for %lu s - restarting", (unsigned long)(stuck_ms / 1000));
-      delay(200); /* let the log line out */
+      sleep_ms(200); /* let the log line out */
       esp_restart();
     }
   }
@@ -212,7 +213,7 @@ void loop()
 {
   static bool s_once;
   static uint32_t s_last_loop_ms;
-  const uint32_t now = millis();
+  const uint32_t now = now_ms();
   if (!s_once) {
     s_once = true;
     serial_log("[loop] first loop() at %lu ms after power-on", (unsigned long)now);
@@ -224,12 +225,12 @@ void loop()
   LOOP_STEP("wifi_ui_loop", wifi_ui_loop());
   LOOP_STEP("clock_ui_loop", clock_ui_loop());
 
-  s_last_loop_ms = millis();
+  s_last_loop_ms = now_ms();
 
   /*
    * The Arduino core calls loop() back-to-back with no pause, so without this it spins at 100 % of
    * core 1 doing nothing (core 1's idle task never runs). Everything polled here (WiFi status, scan
    * results, NTP) changes on a ~100 ms scale, so 5 ms of sleep costs no responsiveness.
    */
-  delay(5);
+  sleep_ms(5);
 }

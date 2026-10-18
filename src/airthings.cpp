@@ -1,12 +1,17 @@
 #include "airthings.h"
 
 #include <NimBLEDevice.h>
-#include "sd_card.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include "sd_text.h"
 
 #include "air_ui.h"
 #include "esp_bsp.h"
 #include "serial_log.h"
+#include "platform_time.h"
 
 /*
  * Airthings Wave sensors over BLE (NimBLE). No pairing: the readings are a plain GATT read.
@@ -31,7 +36,7 @@ static const char *k_plus_chr = "b42e2a68-ade7-11e4-89d3-123b93f75cba";
 
 struct Config {
     uint32_t serial;
-    String address;
+    std::string address;
     uint8_t addr_type;
 };
 
@@ -81,52 +86,31 @@ static void set_status(const char *fmt, ...) {
 /* ---------- config on SD ---------- */
 
 static void load_config(void) {
-    File f = sd_fs().open(k_ini, FILE_READ);
-    if (!f) {
+    std::string content;
+    if (!sd_read_text(k_ini, &content)) {
         serial_log("[air] %s not found: no sensor chosen yet", k_ini);
         return;
     }
-    const String content = f.readString();
-    f.close();
-    int start = 0;
-    while (start < (int)content.length()) {
-        int nl = content.indexOf('\n', start);
-        if (nl < 0) {
-            nl = content.length();
-        }
-        String line = content.substring(start, nl);
-        start = nl + 1;
-        line.trim();
-        const int eq = line.indexOf('=');
-        if (eq < 0 || line.charAt(0) == ';') {
-            continue;
-        }
-        String key = line.substring(0, eq), val = line.substring(eq + 1);
-        key.trim();
-        val.trim();
+    ini_parse(content, [](const std::string &, const std::string &key, const std::string &val) {
         if (key == "serial") {
             s_cfg.serial = strtoul(val.c_str(), nullptr, 10);
         } else if (key == "address") {
             s_cfg.address = val;
         } else if (key == "type") {
-            s_cfg.addr_type = (uint8_t)val.toInt();
+            s_cfg.addr_type = (uint8_t)atoi(val.c_str());
         }
-    }
+    });
     serial_log("[air] sensor: %s SN %lu at %s", airthings_model_name(s_cfg.serial), (unsigned long)s_cfg.serial,
                s_cfg.address.c_str());
 }
 
 static void save_config(void) {
-    File f = sd_fs().open(k_ini, FILE_WRITE);
-    if (!f) {
+    char text[128];
+    snprintf(text, sizeof(text), "[airthings]\nserial=%lu\naddress=%s\ntype=%u\n", (unsigned long)s_cfg.serial,
+             s_cfg.address.c_str(), (unsigned)s_cfg.addr_type);
+    if (!sd_write_text(k_ini, text)) {
         serial_log("[air] cannot write %s", k_ini);
-        return;
     }
-    f.println("[airthings]");
-    f.printf("serial=%lu\n", (unsigned long)s_cfg.serial);
-    f.printf("address=%s\n", s_cfg.address.c_str());
-    f.printf("type=%u\n", (unsigned)s_cfg.addr_type);
-    f.close();
 }
 
 /* ---------- BLE ---------- */
@@ -171,7 +155,7 @@ static void do_scan(void) {
             }
             const uint8_t *p = (const uint8_t *)md.data() + 2;
             const uint32_t serial = p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
-            found.push_back({serial, String(d->getAddress().toString().c_str()), d->getAddress().getType(),
+            found.push_back({serial, d->getAddress().toString(), d->getAddress().getType(),
                              d->getRSSI()});
             serial_log("[air] found %s SN %lu at %s, %d dBm", airthings_model_name(serial), (unsigned long)serial,
                        d->getAddress().toString().c_str(), d->getRSSI());
@@ -228,11 +212,11 @@ static void do_read(void) {
     }
     ensure_ble();
     set_status("Reading sensor...");
-    const uint32_t t0 = millis();
+    const uint32_t t0 = now_ms();
 
     NimBLEClient *c = NimBLEDevice::createClient();
     c->setConnectTimeout(8000);
-    if (!c->connect(NimBLEAddress(std::string(cfg.address.c_str()), cfg.addr_type))) {
+    if (!c->connect(NimBLEAddress(cfg.address, cfg.addr_type))) {
         NimBLEDevice::deleteClient(c);
         set_status("Can't connect - sensor busy (phone app?) or out of range");
         return;
@@ -279,7 +263,7 @@ static void do_read(void) {
     const time_t now = time(nullptr);
     d.updated = now > 1700000000 ? now : 0;
     serial_log("[air] radon 24h %d, long-term %d Bq/m3 | %.2f C | %.1f %% RH | %d dBm | %lu ms", d.radon_st,
-               d.radon_lt, d.temp_c, d.humidity, rssi, (unsigned long)(millis() - t0));
+               d.radon_lt, d.temp_c, d.humidity, rssi, (unsigned long)(now_ms() - t0));
     bsp_display_lock(0);
     s_data = d;
     bsp_display_unlock();

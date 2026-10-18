@@ -11,6 +11,7 @@
 #include "home_ui.h"
 #include "status_bar.h"
 #include "serial_log.h"
+#include "platform_time.h"
 #include "wifi_net.h"
 #include "wifi_store.h"
 
@@ -246,10 +247,10 @@ static void list_item_cb(lv_event_t *e) {
     if (idx >= s_results.size()) {
         return;
     }
-    String pwd;
-    if (wifi_store_find_password(s_results[idx].ssid, &pwd)) {
+    std::string pwd;
+    if (wifi_store_find_password(s_results[idx].ssid.c_str(), &pwd)) {
         s_pending_ssid = s_results[idx].ssid;
-        s_pending_password = pwd;
+        s_pending_password = pwd.c_str();
         s_pending_connect = true;
         set_status_text("Connecting...");
         return;
@@ -391,7 +392,7 @@ static void poll_connection(void) {
                 s_conn = ConnState::Connected;
                 char ssid[33];
                 wifi_net_ssid(ssid, sizeof(ssid));
-                wifi_store_promote(String(ssid));
+                wifi_store_promote(ssid);
                 String msg = connected_msg();
                 bsp_display_lock(0);
                 set_status_string(msg);
@@ -419,7 +420,7 @@ static void poll_connection(void) {
         if (connected) {
             s_conn = ConnState::Connected;
             if (s_connect_from_manual) {
-                wifi_store_save(s_attempt_ssid, s_attempt_password);
+                wifi_store_save(s_attempt_ssid.c_str(), s_attempt_password.c_str());
                 s_connect_from_manual = false;
             }
             String msg = connected_msg();
@@ -433,7 +434,7 @@ static void poll_connection(void) {
             clock_ui_on_wifi_connected();
             return;
         }
-        if (millis() - s_connect_start_ms > 20000) {
+        if (now_ms() - s_connect_start_ms > 20000) {
             s_conn = ConnState::Failed;
             bsp_display_lock(0);
             set_status_text("Connection failed / timeout");
@@ -517,7 +518,7 @@ void wifi_ui_loop(void) {
         if (wifi_store_has_entries()) {
             wifi_store_autoconnect_start();
             s_conn = ConnState::Connecting;
-            s_connect_start_ms = millis();
+            s_connect_start_ms = now_ms();
             s_connect_from_manual = false;
             bsp_display_lock(0);
             set_status_text("Connecting to saved WiFi...");
@@ -547,7 +548,7 @@ void wifi_ui_loop(void) {
         /* Drops the current association (radio stays on), then connects. */
         (void)wifi_net_connect(s_attempt_ssid.c_str(), s_attempt_password.c_str(), 0, nullptr);
         s_conn = ConnState::Connecting;
-        s_connect_start_ms = millis();
+        s_connect_start_ms = now_ms();
     }
 
     poll_async_scan();

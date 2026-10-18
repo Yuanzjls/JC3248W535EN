@@ -1,10 +1,11 @@
 #include "app_settings.h"
 
-#include <Arduino.h>
-#include "sd_card.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string>
 
 #include "display.h"
+#include "sd_text.h"
 #include "serial_log.h"
 #include "weather.h"
 
@@ -25,60 +26,38 @@ static const char *units_name(TempUnits u) {
     return u == TempUnits::Celsius ? "celsius" : u == TempUnits::Fahrenheit ? "fahrenheit" : "auto";
 }
 
+static int clamp_brightness(int v) {
+    return v < k_min_brightness ? k_min_brightness : v > 100 ? 100 : v;
+}
+
 static void save(void) {
-    File f = sd_fs().open(k_path, FILE_WRITE);
-    if (!f) {
+    char text[160];
+    snprintf(text, sizeof(text), "[settings]\nbrightness=%d\nunits=%s\nclock=%s\n", s_settings.brightness,
+             units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h");
+    if (!sd_write_text(k_path, text)) {
         serial_log("[settings] cannot write %s", k_path);
         return;
     }
-    f.println("[settings]");
-    f.printf("brightness=%d\n", s_settings.brightness);
-    f.printf("units=%s\n", units_name(s_settings.units));
-    f.printf("clock=%s\n", s_settings.clock_24h ? "24h" : "12h");
-    f.close();
     serial_log("[settings] saved %s", k_path);
 }
 
 void settings_load(void) {
-    File f = sd_fs().open(k_path, FILE_READ);
-    if (!f) {
+    std::string content;
+    if (!sd_read_text(k_path, &content)) {
         serial_log("[settings] %s not found, using defaults", k_path);
         return;
     }
-    const String content = f.readString();
-    f.close();
-
-    int start = 0;
-    while (start < (int)content.length()) {
-        int nl = content.indexOf('\n', start);
-        if (nl < 0) {
-            nl = content.length();
-        }
-        String line = content.substring(start, nl);
-        start = nl + 1;
-        const int semi = line.indexOf(';');
-        if (semi >= 0) {
-            line = line.substring(0, semi);
-        }
-        line.trim();
-        const int eq = line.indexOf('=');
-        if (eq < 0) {
-            continue;
-        }
-        String key = line.substring(0, eq);
-        String val = line.substring(eq + 1);
-        key.trim();
-        val.trim();
+    ini_parse(content, [](const std::string &, const std::string &key, const std::string &val) {
         if (key == "brightness") {
-            s_settings.brightness = constrain(val.toInt(), k_min_brightness, 100);
+            s_settings.brightness = clamp_brightness(atoi(val.c_str()));
         } else if (key == "units") {
-            s_settings.units = val.equalsIgnoreCase("celsius")      ? TempUnits::Celsius
-                               : val.equalsIgnoreCase("fahrenheit") ? TempUnits::Fahrenheit
-                                                                    : TempUnits::Auto;
+            s_settings.units = str_ieq(val, "celsius")      ? TempUnits::Celsius
+                               : str_ieq(val, "fahrenheit") ? TempUnits::Fahrenheit
+                                                            : TempUnits::Auto;
         } else if (key == "clock") {
-            s_settings.clock_24h = !val.equalsIgnoreCase("12h");
+            s_settings.clock_24h = !str_ieq(val, "12h");
         }
-    }
+    });
     serial_log("[settings] brightness=%d units=%s clock=%s", s_settings.brightness, units_name(s_settings.units),
                s_settings.clock_24h ? "24h" : "12h");
 }
@@ -88,7 +67,7 @@ const AppSettings &settings_get(void) {
 }
 
 void settings_set_brightness(int percent, bool save_now) {
-    s_settings.brightness = constrain(percent, k_min_brightness, 100);
+    s_settings.brightness = clamp_brightness(percent);
     (void)bsp_display_brightness_set(s_settings.brightness);
     if (save_now) {
         save();

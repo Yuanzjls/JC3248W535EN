@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "serial_log.h"
+#include "platform_time.h"
 
 /*
  * CPU usage from FreeRTOS run-time stats (enabled in the Arduino-ESP32 build, counted in esp_timer
@@ -149,7 +150,7 @@ static void sysmon_timer_cb(lv_timer_t *t) {
     LV_UNUSED(t);
     sample_cpu();
     sample_memory();
-    const uint32_t now = millis();
+    const uint32_t now = now_ms();
     if (s_stats.valid && now - s_last_log_ms >= k_log_ms) {
         s_last_log_ms = now;
         log_summary();
@@ -164,7 +165,7 @@ void sysmon_begin(void) {
     started = true;
     sample_cpu(); /* baseline; first real numbers after one interval */
     sample_memory();
-    s_last_log_ms = millis();
+    s_last_log_ms = now_ms();
     (void)lv_timer_create(sysmon_timer_cb, k_sample_ms, nullptr);
 }
 

@@ -1,6 +1,5 @@
 #include "clock_ui.h"
 
-#include <Arduino.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,7 +109,7 @@ static void clock_timer_cb(lv_timer_t *t) {
 }
 
 void clock_ui_init(void) {
-    String tz;
+    std::string tz;
     if (timezone_ini_load(&tz)) {
         setenv("TZ", tz.c_str(), 1);
         tzset();

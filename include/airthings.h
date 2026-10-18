@@ -1,12 +1,15 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string>
+#include <time.h>
 #include <vector>
 
 /** A sensor seen during "Find sensor". */
 struct AirFound {
     uint32_t serial; /* e.g. 2950123456; first 4 digits = model */
-    String address;  /* BLE address "aa:bb:cc:dd:ee:ff" */
+    std::string address; /* BLE address "aa:bb:cc:dd:ee:ff" */
     uint8_t addr_type;
     int rssi;
 };
