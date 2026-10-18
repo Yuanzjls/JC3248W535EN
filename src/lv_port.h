@@ -169,6 +169,27 @@ void lvgl_port_unlock(void);
  */
 void lvgl_port_flush_frame(lv_disp_t *disp, const lv_color_t *frame);
 
+/** What the LVGL task is doing (UI watchdog). */
+enum {
+    LVGL_STAGE_SLEEP = 0,
+    LVGL_STAGE_WAIT_LOCK,
+    LVGL_STAGE_HANDLER,
+    LVGL_STAGE_FLUSH,
+    LVGL_STAGE_WAIT_TE,
+    LVGL_STAGE_WAIT_DMA,
+};
+
+/**
+ * @brief UI watchdog probe (safe from any task)
+ *
+ * stuck_ms: how long the LVGL task has been in its current stage (0 while sleeping);
+ * lock_holder: name of the task holding the display lock, or "nobody".
+ */
+void lvgl_port_debug(uint32_t *stuck_ms, int *stage, const char **lock_holder);
+
+/** Human-readable stage name for logs. */
+const char *lvgl_port_stage_name(int stage);
+
 #ifdef __cplusplus
 }
 #endif

@@ -85,6 +85,14 @@ static void lvgl_port_task_deinit(void);
 static bool lvgl_port_flush_ready_callback(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx);
 #endif
 static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map);
+
+/* UI watchdog support (see lvgl_port_debug): where the LVGL task is, and since when. */
+static volatile uint8_t s_lvgl_stage = LVGL_STAGE_SLEEP;
+static volatile int64_t s_lvgl_stage_since_us = 0;
+static TaskHandle_t s_lvgl_task = NULL;
+/* Only the LVGL task's own progress counts: flush_area() also runs on the media task (direct
+ * video frames), and those calls must not look like the UI being stuck. */
+#define LVGL_SET_STAGE(st) do { if (xTaskGetCurrentTaskHandle() == s_lvgl_task) { s_lvgl_stage = (st); s_lvgl_stage_since_us = esp_timer_get_time(); } } while (0)
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
 static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data);
 #endif
@@ -115,9 +123,9 @@ esp_err_t lvgl_port_init(const lvgl_port_cfg_t *cfg)
 
     BaseType_t res;
     if (cfg->task_affinity < 0) {
-        res = xTaskCreate(lvgl_port_task, "LVGL task", cfg->task_stack, NULL, cfg->task_priority, NULL);
+        res = xTaskCreate(lvgl_port_task, "LVGL task", cfg->task_stack, NULL, cfg->task_priority, &s_lvgl_task);
     } else {
-        res = xTaskCreatePinnedToCore(lvgl_port_task, "LVGL task", cfg->task_stack, NULL, cfg->task_priority, NULL, cfg->task_affinity);
+        res = xTaskCreatePinnedToCore(lvgl_port_task, "LVGL task", cfg->task_stack, NULL, cfg->task_priority, &s_lvgl_task, cfg->task_affinity);
     }
     ESP_GOTO_ON_FALSE(res == pdPASS, ESP_FAIL, err, TAG, "Create LVGL task fail!");
 
@@ -383,6 +391,7 @@ static void lvgl_port_task(void *arg)
     int64_t last_report_us = 0;
     while (lvgl_port_ctx.running) {
         const int64_t want_us = esp_timer_get_time();
+        LVGL_SET_STAGE(LVGL_STAGE_WAIT_LOCK);
         if (lvgl_port_lock(0)) {
             const int64_t got_us = esp_timer_get_time();
             const int64_t gap_ms = (got_us - last_run_us) / 1000;
@@ -392,9 +401,11 @@ static void lvgl_port_task(void *arg)
                            (long)((got_us - want_us) / 1000));
             }
             last_run_us = got_us;
+            LVGL_SET_STAGE(LVGL_STAGE_HANDLER);
             task_delay_ms = lv_timer_handler();
             lvgl_port_unlock();
         }
+        LVGL_SET_STAGE(LVGL_STAGE_SLEEP);
         /*
          * lv_timer_handler() returns the ms until the next timer is due. The original port also
          * mapped a return of 1 to task_max_sleep_ms (500 ms), so whenever a redraw finished 1 ms
@@ -569,12 +580,19 @@ static void flush_area(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *co
 
             if (0 == i) {
                 if (disp_ctx->draw_wait_cb) {
+                    LVGL_SET_STAGE(LVGL_STAGE_WAIT_TE);
                     disp_ctx->draw_wait_cb(disp_ctx->panel_handle->user_data);
                 }
                 xSemaphoreGive(disp_ctx->trans_done_sem);
             }
 
-            xSemaphoreTake(disp_ctx->trans_done_sem, portMAX_DELAY);
+            /* Wait for the previous strip's DMA to finish - never forever (we hold the display
+             * lock here: a missed "done" interrupt used to freeze the whole UI). */
+            LVGL_SET_STAGE(LVGL_STAGE_WAIT_DMA);
+            if (xSemaphoreTake(disp_ctx->trans_done_sem, pdMS_TO_TICKS(500)) != pdTRUE) {
+                serial_log("[lcd] display transfer-done missing (waited 500 ms) - continuing");
+            }
+            LVGL_SET_STAGE(LVGL_STAGE_FLUSH);
             esp_lcd_panel_draw_bitmap(disp_ctx->panel_handle, x_draw_start, y_draw_start, x_draw_end + 1, y_draw_end + 1, to);
 
             if (LV_DISP_ROT_90 == rotate) {
@@ -663,4 +681,27 @@ static esp_err_t lvgl_port_tick_init(void)
     };
     ESP_RETURN_ON_ERROR(esp_timer_create(&lvgl_tick_timer_args, &lvgl_port_ctx.tick_timer), TAG, "Creating LVGL timer filed!");
     return esp_timer_start_periodic(lvgl_port_ctx.tick_timer, lvgl_port_timer_period_ms * 1000);
+}
+
+void lvgl_port_debug(uint32_t *stuck_ms, int *stage, const char **lock_holder)
+{
+    const uint8_t st = s_lvgl_stage;
+    *stage = st;
+    /* Sleeping is never "stuck" (the task wakes at least every task_max_sleep_ms). */
+    *stuck_ms = (st == LVGL_STAGE_SLEEP) ? 0 : (uint32_t)((esp_timer_get_time() - s_lvgl_stage_since_us) / 1000);
+    TaskHandle_t holder = xSemaphoreGetMutexHolder(lvgl_port_ctx.lvgl_mux);
+    *lock_holder = holder ? pcTaskGetName(holder) : "nobody";
+}
+
+const char *lvgl_port_stage_name(int stage)
+{
+    switch (stage) {
+    case LVGL_STAGE_SLEEP: return "sleeping";
+    case LVGL_STAGE_WAIT_LOCK: return "waiting for the display lock";
+    case LVGL_STAGE_HANDLER: return "running timers / event callbacks";
+    case LVGL_STAGE_FLUSH: return "sending a frame to the panel";
+    case LVGL_STAGE_WAIT_TE: return "waiting for the panel TE pulse";
+    case LVGL_STAGE_WAIT_DMA: return "waiting for display DMA";
+    default: return "unknown";
+    }
 }

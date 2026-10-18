@@ -29,6 +29,7 @@
 #define LVGL_PORT_ROTATION_DEGREE (90)
 
 void setup();
+static void ui_watchdog_task(void *arg);
 
 /** Why the chip last restarted - tells a crash (panic/WDT/brownout) apart from a power cycle. */
 static const char *reset_reason_str(esp_reset_reason_t r)
@@ -136,6 +137,8 @@ void setup()
   BOOT_STEP("wifi_ui_init", wifi_ui_init());
   BOOT_STEP("home_ui_init", home_ui_init()); /* default screen: app launcher */
   sysmon_begin(); /* CPU + memory sampling, [sys] log every 60 s */
+  /* Small internal stack, core 1, above loop(): must keep running when the UI is stuck. */
+  xTaskCreatePinnedToCore(ui_watchdog_task, "ui_wdog", 3072, nullptr, 3, nullptr, 1);
 
   bsp_display_unlock();
 
@@ -158,6 +161,42 @@ static const uint32_t k_slow_step_ms = 200;
       serial_log("[loop] SLOW: %s blocked %lu ms", name, (unsigned long)_d);                    \
     }                                                                                            \
   } while (0)
+
+/*
+ * UI watchdog. The UI froze once on the Home screen: the LVGL task stopped while holding the
+ * display lock (no more [sys] lines, weather blocked on the lock). Its own task - not loop(),
+ * which also takes the lock (WiFi screen updates) and would freeze with it. Logs where the LVGL
+ * task is stuck and who holds the lock after 5 s; restarts the board after 30 s so a wall display
+ * never stays frozen (WiFi, settings and the sensor come back on their own).
+ */
+static void ui_watchdog_task(void *arg)
+{
+  LV_UNUSED(arg);
+  static const uint32_t k_warn_ms = 5000;
+  static const uint32_t k_restart_ms = 30000;
+  uint32_t last_warn = 0;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    uint32_t stuck_ms = 0;
+    int stage = 0;
+    const char *holder = "";
+    lvgl_port_debug(&stuck_ms, &stage, &holder);
+    if (stuck_ms < k_warn_ms) {
+      last_warn = 0;
+      continue;
+    }
+    if (last_warn == 0 || stuck_ms - last_warn >= k_warn_ms) {
+      last_warn = stuck_ms;
+      serial_log("[ui] WATCHDOG: LVGL task stuck %lu s, %s (display lock held by: %s)",
+                 (unsigned long)(stuck_ms / 1000), lvgl_port_stage_name(stage), holder);
+    }
+    if (stuck_ms >= k_restart_ms) {
+      serial_log("[ui] WATCHDOG: UI frozen for %lu s - restarting", (unsigned long)(stuck_ms / 1000));
+      delay(200); /* let the log line out */
+      esp_restart();
+    }
+  }
+}
 
 void loop()
 {

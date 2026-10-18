@@ -28,6 +28,7 @@
 #include "lv_port.h"
 #include "display.h"
 #include "esp_bsp.h"
+#include "serial_log.h"
 
 static const char *TAG = "example";
 
@@ -182,8 +183,20 @@ static bool bsp_display_sync_cb(void *arg)
     }
 
     if (tear_handle->te_v_sync_sem) {
-
-        xSemaphoreTake(tear_handle->te_v_sync_sem, portMAX_DELAY);
+        /*
+         * Wait for the panel's tear-effect pulse (~60 Hz) so a frame starts right after a refresh.
+         * Never forever: this runs inside the LVGL task while it holds the display lock, so a
+         * single missed pulse used to freeze the whole UI (picture and touch) for good. Without the
+         * pulse we just draw - at worst one slightly torn frame.
+         */
+        if (xSemaphoreTake(tear_handle->te_v_sync_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
+            static int64_t last_log_us = 0;
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us - last_log_us > 10000000) {
+                last_log_us = now_us;
+                serial_log("[lcd] TE sync pulse missing (waited 100 ms) - drawing anyway");
+            }
+        }
     }
     return true;
 }
