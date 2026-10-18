@@ -571,7 +571,7 @@ CONFIG_ARDUHAL_PARTITION_SCHEME="default"
 CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
 # Arduino libraries used here: FS only (fs::FS over VFS).
 # Wi-Fi runs on esp_wifi (wifi_net.cpp), HTTP on esp_http_client, NTP on esp_sntp.
-# BLE is NimBLE-Arduino (a PlatformIO library, not Arduino's BLE). Everything else is left out.
+# BLE is esp-nimble-cpp (ESP-IDF component, not Arduino's BLE). Everything else is left out.
 # CONFIG_ARDUINO_SELECTIVE_SPI is not set
 # CONFIG_ARDUINO_SELECTIVE_Wire is not set
 # CONFIG_ARDUINO_SELECTIVE_ESP_SR is not set

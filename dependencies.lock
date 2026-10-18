@@ -379,6 +379,30 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.4.6
+  h2zero/esp-nimble-cpp:
+    component_hash: 720050476f7fb47bd0aa08a94642fd09a50536391d60081858702a789405d76f
+    dependencies:
+    - name: espressif/esp_hosted
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: '*'
+    - name: espressif/esp_wifi_remote
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: '>=0.5.3'
+    - name: idf
+      require: private
+      rules:
+      - if: target in [esp32p4]
+      version: '>=5.3.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.5.0
   idf:
     source:
       type: idf
@@ -411,8 +435,9 @@ direct_dependencies:
 - espressif/network_provisioning
 - espressif/qrcode
 - espressif/rmaker_common
+- h2zero/esp-nimble-cpp
 - idf
 - joltwallet/littlefs
-manifest_hash: 5bf89e7dd0ab3452a9daa1d8772af70abf4fb9b22fdc3fd59e39a10bc5fd375f
+manifest_hash: 9d1497d92eb56873d831d119ad28ae4431ca493a70f62f901983afc545f696ad
 target: esp32s3
 version: 2.0.0
