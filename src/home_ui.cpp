@@ -9,7 +9,7 @@
 #include "clock_ui.h"
 #include "files_ui.h"
 #include "serial_log.h"
-#include "settings.h"
+#include "app_settings.h"
 #include "status_bar.h"
 #include "ui_font.h"
 #include "ui_theme.h"

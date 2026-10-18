@@ -37,3 +37,10 @@ Thumbs.db
 desktop.ini
 *.swp
 *~
+
+# --- ESP-IDF build ---
+# Components downloaded by the IDF component manager (re-fetched from dependencies.lock)
+managed_components/
+# Generated full config (sdkconfig.defaults is the source of truth)
+sdkconfig.JC3248W535EN
+sdkconfig.JC3248W535EN.old

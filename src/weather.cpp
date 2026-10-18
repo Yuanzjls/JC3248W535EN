@@ -7,7 +7,7 @@
 
 #include "esp_bsp.h"
 #include "serial_log.h"
-#include "settings.h"
+#include "app_settings.h"
 #include "weather_ui.h"
 
 /*

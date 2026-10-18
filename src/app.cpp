@@ -11,7 +11,7 @@
 #include "wifi_ui.h"
 #include "home_ui.h"
 #include "weather.h"
-#include "settings.h"
+#include "app_settings.h"
 #include "airthings.h"
 #include "sysmon.h"
 

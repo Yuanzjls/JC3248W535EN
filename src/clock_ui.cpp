@@ -9,7 +9,7 @@
 #include <lvgl.h>
 
 #include "serial_log.h"
-#include "settings.h"
+#include "app_settings.h"
 #include "status_bar.h"
 #include "time_sync.h"
 #include "timezone_ini.h"

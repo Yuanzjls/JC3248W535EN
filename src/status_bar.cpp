@@ -5,7 +5,7 @@
 #include <time.h>
 
 #include "home_ui.h"
-#include "settings.h"
+#include "app_settings.h"
 #include "ui_font.h"
 #include "ui_theme.h"
 #include "weather_ui.h"
