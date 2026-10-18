@@ -1,7 +1,10 @@
 #include "app_settings.h"
 #include "platform_time.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string>
+#include <string.h>
 #include "wifi_net.h"
 #include <lvgl.h>
 #include <math.h>
@@ -136,16 +139,16 @@ static void sync_from_state(void) {
         }
     }
 
-    String about = "WiFi  ";
+    std::string about = "WiFi  ";
     if (wifi_net_connected()) {
         char ssid[33], ip[16];
         wifi_net_ssid(ssid, sizeof(ssid));
         wifi_net_ip(ip, sizeof(ip));
-        about += String(ssid) + "  (" + ip + ", " + String(wifi_net_rssi()) + " dBm)";
+        about += std::string(ssid) + "  (" + ip + ", " + std::to_string(wifi_net_rssi()) + " dBm)";
     } else {
         about += "not connected";
     }
-    about += "\nUptime  " + String(now_ms() / 60000UL) + " min";
+    about += "\nUptime  " + std::to_string(now_ms() / 60000UL) + " min";
     about += "\nBuild  " __DATE__ " " __TIME__;
     lv_label_set_text(s_about, about.c_str());
 }
@@ -260,7 +263,7 @@ static void build_screen(void) {
 
     /* Timezone */
     row = add_row(list, "Timezone");
-    String opts;
+    std::string opts;
     for (int i = 0; i < k_tz_n; i++) {
         if (i) {
             opts += '\n';

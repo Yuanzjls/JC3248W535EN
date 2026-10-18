@@ -1,6 +1,9 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 static const int k_weather_days = 7;   /* today + 6 */
 static const int k_weather_hours = 24; /* starting at the current hour */

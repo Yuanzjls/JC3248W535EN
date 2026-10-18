@@ -1,6 +1,8 @@
 #include "air_ui.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #include "airthings.h"
@@ -155,13 +157,13 @@ void air_ui_on_update(void) {
             } else {
                 strlcpy(lt, "not yet", sizeof(lt));
             }
-            String s = String("Long-term avg   ") + lt + "\nTemperature   " +
-                       String(f ? d.temp_c * 9 / 5 + 32 : d.temp_c, 1) + (f ? "\xC2\xB0" "F" : "\xC2\xB0" "C") +
-                       "\nHumidity   " + String(d.humidity, 1) + " %";
-            if (d.has_plus) {
-                s += "\nCO2   " + String(d.co2_ppm) + " ppm    VOC   " + String(d.voc_ppb) + " ppb";
+            char s[192];
+            int n = snprintf(s, sizeof(s), "Long-term avg   %s\nTemperature   %.1f%s\nHumidity   %.1f %%", lt,
+                             f ? d.temp_c * 9 / 5 + 32 : d.temp_c, f ? "\xC2\xB0" "F" : "\xC2\xB0" "C", d.humidity);
+            if (d.has_plus && n > 0 && n < (int)sizeof(s)) {
+                snprintf(s + n, sizeof(s) - n, "\nCO2   %d ppm    VOC   %d ppb", d.co2_ppm, d.voc_ppb);
             }
-            lv_label_set_text(s_details, s.c_str());
+            lv_label_set_text(s_details, s);
         } else {
             lv_obj_set_style_text_color(s_radon, ui_color_text_muted(), 0);
             lv_label_set_text(s_radon, "--");

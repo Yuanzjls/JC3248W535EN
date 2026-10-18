@@ -1,6 +1,8 @@
 #include "status_bar.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include "wifi_net.h"
 #include <time.h>
 

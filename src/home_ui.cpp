@@ -1,6 +1,8 @@
 #include "home_ui.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #include "air_ui.h"

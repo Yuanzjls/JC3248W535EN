@@ -18,6 +18,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <algorithm>
 #include <new>
 #include <strings.h>
 
@@ -970,7 +971,7 @@ static void play_video(const char *path) {
             }
             if (c.cmd == Cmd::Seek) {
                 xQueueReceive(s_queue, &c, 0);
-                const uint32_t permille = (uint32_t)constrain(c.arg, 0, 1000);
+                const uint32_t permille = (uint32_t)std::max(0, std::min(c.arg, 1000));
                 if (s_index_done) {
                     /* Exact: the bar is time-based, so jump to that frame's offset. */
                     const uint32_t n = s_index_count;

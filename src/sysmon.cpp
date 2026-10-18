@@ -1,6 +1,8 @@
 #include "sysmon.h"
 
-#include <Arduino.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>

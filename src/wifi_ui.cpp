@@ -1,7 +1,7 @@
 #include "wifi_ui.h"
 
-#include <Arduino.h>
 #include <algorithm>
+#include <string>
 #include <lvgl.h>
 #include <vector>
 
@@ -16,7 +16,7 @@
 #include "wifi_store.h"
 
 struct ScanResult {
-    String ssid;
+    std::string ssid;
     int rssi;
     uint8_t enc_type;
 };
@@ -42,11 +42,11 @@ struct PasswordDlgLayout {
 };
 static PasswordDlgLayout s_pwd_layout;
 
-static String s_pending_ssid;
-static String s_pending_password;
+static std::string s_pending_ssid;
+static std::string s_pending_password;
 static volatile bool s_pending_connect = false;
-static String s_attempt_ssid;
-static String s_attempt_password;
+static std::string s_attempt_ssid;
+static std::string s_attempt_password;
 static bool s_connect_from_manual = false;
 static bool s_wifi_auto_started = false;
 
@@ -60,8 +60,8 @@ static void set_status_text(const char *txt) {
     }
 }
 
-/** UTF-8 / Chinese SSIDs need heap String, not tiny stack buffers */
-static void set_status_string(const String &s) {
+/** UTF-8 / Chinese SSIDs need heap strings, not tiny stack buffers */
+static void set_status_string(const std::string &s) {
     if (s_status_lbl) {
         lv_label_set_text(s_status_lbl, s.c_str());
     }
@@ -272,7 +272,7 @@ static void rebuild_list_cb(void *user_data) {
         for (size_t i = 0; i < s_results.size(); i++) {
             const ScanResult &r = s_results[i];
             /* Leading index helps when SimSun CJK subset omits rare SSID characters. */
-            String line = String("#") + String((unsigned)i) + " " + r.ssid + " (" + String(r.rssi) + " dBm)";
+            const std::string line = "#" + std::to_string(i) + " " + r.ssid + " (" + std::to_string(r.rssi) + " dBm)";
             lv_obj_t *btn = lv_list_add_btn(s_list, LV_SYMBOL_WIFI, line.c_str());
             lv_obj_set_style_text_font(btn, ui_font_get(), LV_PART_MAIN);
             for (uint32_t ch = 0; ch < lv_obj_get_child_cnt(btn); ch++) {
@@ -374,11 +374,11 @@ static void poll_async_scan(void) {
 }
 
 /** "Connected: <ssid>\nIP a.b.c.d" for the status label. */
-static String connected_msg(void) {
+static std::string connected_msg(void) {
     char ssid[33], ip[16];
     wifi_net_ssid(ssid, sizeof(ssid));
     wifi_net_ip(ip, sizeof(ip));
-    return String("Connected: ") + ssid + "\nIP " + ip;
+    return std::string("Connected: ") + ssid + "\nIP " + ip;
 }
 
 static void poll_connection(void) {
@@ -393,7 +393,7 @@ static void poll_connection(void) {
                 char ssid[33];
                 wifi_net_ssid(ssid, sizeof(ssid));
                 wifi_store_promote(ssid);
-                String msg = connected_msg();
+                std::string msg = connected_msg();
                 bsp_display_lock(0);
                 set_status_string(msg);
                 if (s_status_lbl) {
@@ -423,7 +423,7 @@ static void poll_connection(void) {
                 wifi_store_save(s_attempt_ssid.c_str(), s_attempt_password.c_str());
                 s_connect_from_manual = false;
             }
-            String msg = connected_msg();
+            std::string msg = connected_msg();
             bsp_display_lock(0);
             set_status_string(msg);
             if (s_status_lbl) {
@@ -459,7 +459,7 @@ static void poll_connection(void) {
     } else if (s_conn != ConnState::Connected && connected) {
         /* Back by itself: wifi_net reconnects after a lost connection. */
         s_conn = ConnState::Connected;
-        String msg = connected_msg();
+        std::string msg = connected_msg();
         bsp_display_lock(0);
         set_status_string(msg);
         bsp_display_unlock();
