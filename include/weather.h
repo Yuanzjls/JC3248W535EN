@@ -50,6 +50,25 @@ void weather_begin(void);
 /** Ask the task to fetch now (safe from any task, e.g. an LVGL button callback). */
 void weather_refresh(void);
 
+/** Where the forecast is for. */
+struct WeatherLocation {
+    bool manual;   /* true: from /weather.ini; false: IP geolocation */
+    bool known;    /* coordinates resolved (geolocation may still be pending) */
+    float lat;
+    float lon;
+    char name[48];
+};
+
+/** Current location (safe from any task). */
+void weather_get_location(WeatherLocation *out);
+
+/**
+ * Use a fixed location (manual = true: lat/lon/name, saved to /weather.ini) or go back to IP
+ * geolocation (manual = false: /weather.ini removed). Re-fetches right away. Any task.
+ * False if the file can't be written or the coordinates are out of range.
+ */
+bool weather_set_location(const WeatherLocation *loc);
+
 /** Short status for the UI ("Waiting for WiFi", "Updating...", error text, or ""). */
 const char *weather_status(void);
 

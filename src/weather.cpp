@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include "sd_card.h"
 #include "sd_text.h"
+#include <unistd.h>
 #include "wifi_net.h"
 
 #include "esp_bsp.h"
@@ -32,12 +34,28 @@ struct WeatherConfig {
     float lat;
     float lon;
     std::string name;
-    int units; /* -1 = auto, 0 = celsius, 1 = fahrenheit */
+    int units;   /* -1 = auto, 0 = celsius, 1 = fahrenheit */
+    bool manual; /* coordinates from /weather.ini (else IP geolocation) */
 };
 
-static WeatherConfig s_cfg = {false, 0, 0, "", -1};
+/* Owned by the weather task; other tasks only read it, under s_cfg_lock (weather_get_location). */
+static WeatherConfig s_cfg = {false, 0, 0, "", -1, false};
+static SemaphoreHandle_t s_cfg_lock = nullptr;
+static volatile bool s_reload = false; /* weather_set_location(): re-read /weather.ini */
 static TaskHandle_t s_task = nullptr;
 static volatile const char *s_status = "Waiting for WiFi";
+
+static void cfg_lock(void) {
+    if (s_cfg_lock) {
+        xSemaphoreTake(s_cfg_lock, portMAX_DELAY);
+    }
+}
+
+static void cfg_unlock(void) {
+    if (s_cfg_lock) {
+        xSemaphoreGive(s_cfg_lock);
+    }
+}
 
 static void set_status(const char *s) {
     s_status = s;
@@ -48,12 +66,16 @@ static void set_status(const char *s) {
 }
 
 static void load_ini(void) {
+    cfg_lock();
+    s_cfg = {false, 0, 0, "", -1, false};
+    cfg_unlock();
     std::string content;
     if (!sd_read_text(k_ini_path, &content)) {
         serial_log("[weather] %s not found, using IP geolocation", k_ini_path);
         return;
     }
     bool have_lat = false, have_lon = false;
+    cfg_lock();
     ini_parse(content, [&](const std::string &, const std::string &key, const std::string &val) {
         if (key == "lat") {
             s_cfg.lat = strtof(val.c_str(), nullptr);
@@ -68,6 +90,8 @@ static void load_ini(void) {
         }
     });
     s_cfg.have_coords = have_lat && have_lon;
+    s_cfg.manual = s_cfg.have_coords;
+    cfg_unlock();
     serial_log("[weather] %s: coords=%s name=\"%s\" units=%d", k_ini_path, s_cfg.have_coords ? "yes" : "no",
                s_cfg.name.c_str(), s_cfg.units);
 }
@@ -177,6 +201,7 @@ static bool geolocate(void) {
         set_status("Location lookup failed");
         return false;
     }
+    cfg_lock();
     s_cfg.lat = doc["lat"] | 0.0f;
     s_cfg.lon = doc["lon"] | 0.0f;
     if (s_cfg.name.length() == 0) {
@@ -186,6 +211,7 @@ static bool geolocate(void) {
         s_cfg.units = strcmp(doc["countryCode"] | "", "US") == 0 ? 1 : 0;
     }
     s_cfg.have_coords = true;
+    cfg_unlock();
     serial_log("[weather] geolocated: %s (%.2f, %.2f)", s_cfg.name.c_str(), s_cfg.lat, s_cfg.lon);
     return true;
 }
@@ -267,6 +293,10 @@ static void weather_task(void *arg) {
     static WeatherData wd; /* static: keep the struct off the task stack */
 
     for (;;) {
+        if (s_reload) { /* weather_set_location(): new /weather.ini, or removed for geolocation */
+            s_reload = false;
+            load_ini();
+        }
         if (!wifi_net_connected()) {
             if (strcmp((const char *)s_status, "Waiting for WiFi") != 0) {
                 set_status("Waiting for WiFi");
@@ -298,6 +328,7 @@ void weather_begin(void) {
     if (s_task) {
         return;
     }
+    s_cfg_lock = xSemaphoreCreateMutex();
     /* 10 KB: HTTP client + JSON parsing; low priority so it never competes with the UI. */
     /* Core 1 (with the loop task): core 0 is busy with LVGL redraws and the WiFi stack. */
     xTaskCreatePinnedToCoreWithCaps(weather_task, "weather", 10240, nullptr, 1, &s_task, 1, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
@@ -311,6 +342,44 @@ void weather_refresh(void) {
 
 const char *weather_status(void) {
     return (const char *)s_status;
+}
+
+void weather_get_location(WeatherLocation *out) {
+    cfg_lock();
+    out->manual = s_cfg.manual;
+    out->known = s_cfg.have_coords;
+    out->lat = s_cfg.lat;
+    out->lon = s_cfg.lon;
+    strlcpy(out->name, s_cfg.name.c_str(), sizeof(out->name));
+    cfg_unlock();
+}
+
+bool weather_set_location(const WeatherLocation *loc) {
+    if (loc->manual) {
+        if (!(loc->lat >= -90 && loc->lat <= 90 && loc->lon >= -180 && loc->lon <= 180)) {
+            return false;
+        }
+        /* Keep the name to one plain line: no line breaks, and no ';' (starts an INI comment). */
+        std::string name;
+        for (const char *p = loc->name; *p && name.size() < sizeof(loc->name) - 1; p++) {
+            if ((unsigned char)*p >= 0x20 && *p != ';') {
+                name += *p;
+            }
+        }
+        char text[160];
+        snprintf(text, sizeof(text), "[weather]\nlat=%.4f\nlon=%.4f\nname=%s\n", loc->lat, loc->lon,
+                 str_trim(name).c_str());
+        if (!sd_write_text(k_ini_path, text)) {
+            serial_log("[weather] cannot write %s", k_ini_path);
+            return false;
+        }
+    } else {
+        unlink(sd_path(k_ini_path).c_str()); /* missing is fine: geolocation either way */
+    }
+    serial_log("[weather] location set: %s", loc->manual ? "manual" : "IP geolocation");
+    s_reload = true;
+    weather_refresh();
+    return true;
 }
 
 const char *weather_code_text(int code) {

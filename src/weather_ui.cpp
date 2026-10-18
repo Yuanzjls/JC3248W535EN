@@ -387,6 +387,10 @@ void weather_ui_on_status(void) {
     update_status_label();
 }
 
+const WeatherData &weather_ui_data(void) {
+    return s_data;
+}
+
 const char *weather_ui_tile_text(void) {
     return s_tile_text;
 }

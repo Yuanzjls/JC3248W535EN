@@ -15,6 +15,7 @@
 #include "clock_ui.h"
 #include "wifi_store.h"
 #include "wifi_ui.h"
+#include "web_server.h"
 #include "home_ui.h"
 #include "weather.h"
 #include "app_settings.h"
@@ -143,6 +144,7 @@ static void setup(void)
 
   BOOT_STEP("font load from SD", (void)ui_font_load_from_sd());
   BOOT_STEP("wifi_ui_init", wifi_ui_init());
+  BOOT_STEP("web_server_start", web_server_start()); /* http://<IP>/ once Wi-Fi is up */
   BOOT_STEP("home_ui_init", home_ui_init()); /* default screen: app launcher */
   sysmon_begin(); /* CPU + memory sampling, [sys] log every 60 s */
   /* Small internal stack, core 1, above loop(): must keep running when the UI is stuck. */

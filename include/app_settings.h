@@ -25,6 +25,11 @@ void settings_set_clock_24h(bool on);
 /** "14:05", or in 12h mode "2:05 PM" (with_ampm) / "2:05" (without). */
 void settings_format_hm(char *buf, size_t n, const struct tm *ti, bool with_ampm);
 
+/** Timezones offered in Settings (and on the web page): label like "US Eastern", POSIX TZ string. */
+int settings_timezone_count(void);
+const char *settings_timezone_label(int i);
+const char *settings_timezone_posix(int i);
+
 /** Show the Settings app (LVGL context / under bsp_display_lock). */
 void settings_ui_open(void);
 

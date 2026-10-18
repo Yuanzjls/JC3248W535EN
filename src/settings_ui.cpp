@@ -40,6 +40,18 @@ static const TzOption k_timezones[] = {
 };
 static const int k_tz_n = sizeof(k_timezones) / sizeof(k_timezones[0]);
 
+int settings_timezone_count(void) {
+    return k_tz_n;
+}
+
+const char *settings_timezone_label(int i) {
+    return (i >= 0 && i < k_tz_n) ? k_timezones[i].label : "";
+}
+
+const char *settings_timezone_posix(int i) {
+    return (i >= 0 && i < k_tz_n) ? k_timezones[i].posix : "";
+}
+
 static lv_obj_t *s_scr = nullptr;
 static lv_obj_t *s_slider = nullptr;
 static lv_obj_t *s_slider_val = nullptr;
@@ -145,6 +157,7 @@ static void sync_from_state(void) {
         wifi_net_ssid(ssid, sizeof(ssid));
         wifi_net_ip(ip, sizeof(ip));
         about += std::string(ssid) + "  (" + ip + ", " + std::to_string(wifi_net_rssi()) + " dBm)";
+        about += "\nWeb page  http://" + std::string(ip) + "/";
     } else {
         about += "not connected";
     }
