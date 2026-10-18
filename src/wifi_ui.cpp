@@ -328,7 +328,7 @@ static std::vector<ScanResult> collect_and_sort(void) {
 }
 
 /**
- * Publish scan results and schedule the list rebuild. Runs on the Arduino loop task, so it must
+ * Publish scan results and schedule the list rebuild. Runs on the loop task (loop() in app.cpp), so it must
  * hold the LVGL lock: s_results is read by LVGL callbacks and lv_async_call touches LVGL timers.
  */
 static void publish_results(std::vector<ScanResult> &&results) {

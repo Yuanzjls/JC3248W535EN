@@ -19,6 +19,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <algorithm>
+#include <math.h>
 #include <new>
 #include <strings.h>
 

@@ -115,16 +115,6 @@ static void save_config(void) {
 
 /* ---------- BLE ---------- */
 
-/*
- * Tell the Arduino core that Bluetooth is used. Otherwise initArduino() hands the BT controller's
- * memory back to the heap at boot (esp_bt_controller_mem_release) and the first
- * NimBLEDevice::init() crashes inside esp_bt_controller_init(). NimBLE-Arduino set this flag
- * itself; esp-nimble-cpp knows nothing of Arduino. Goes away with the Arduino component (step 8).
- */
-extern "C" bool btInUse(void) {
-    return true;
-}
-
 static void ensure_ble(void) {
     if (s_ble_on) {
         return;

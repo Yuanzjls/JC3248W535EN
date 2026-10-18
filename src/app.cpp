@@ -1,6 +1,10 @@
 
-#include <Arduino.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <lvgl.h>
+#include <nvs_flash.h>
 #include "display.h"
 #include "serial_log.h"
 #include "platform_time.h"
@@ -31,7 +35,8 @@
  */
 #define LVGL_PORT_ROTATION_DEGREE (90)
 
-void setup();
+static void setup(void);
+static void loop(void);
 static void ui_watchdog_task(void *arg);
 
 /** Why the chip last restarted - tells a crash (panic/WDT/brownout) apart from a power cycle. */
@@ -94,7 +99,7 @@ static void disp_monitor_cb(lv_disp_drv_t *drv, uint32_t time_ms, uint32_t px)
     serial_log("[boot] %s done in %lu ms", name, (unsigned long)(now_ms() - _t));               \
   } while (0)
 
-void setup()
+static void setup(void)
 {
   s_boot_t0 = now_ms();
   serial_log_init();
@@ -123,7 +128,7 @@ void setup()
   cfg.lvgl_port_cfg.task_stack = 16384;
   /*
    * Pin LVGL to core 0. The panel needs full-frame refreshes, so an animated screen keeps the LVGL
-   * task (priority 4) busy; unpinned, it also took core 1 and starved Arduino loop() (priority 1),
+   * task (priority 4) busy; unpinned, it also took core 1 and starved loop() (priority 1),
    * which showed up as "[loop] SLOW: ... blocked" and delayed WiFi handling. WiFi's own tasks on
    * core 0 have far higher priority, so they are unaffected.
    */
@@ -209,7 +214,7 @@ static void ui_watchdog_task(void *arg)
   }
 }
 
-void loop()
+static void loop(void)
 {
   static bool s_once;
   static uint32_t s_last_loop_ms;
@@ -228,9 +233,42 @@ void loop()
   s_last_loop_ms = now_ms();
 
   /*
-   * The Arduino core calls loop() back-to-back with no pause, so without this it spins at 100 % of
-   * core 1 doing nothing (core 1's idle task never runs). Everything polled here (WiFi status, scan
-   * results, NTP) changes on a ~100 ms scale, so 5 ms of sleep costs no responsiveness.
+   * loop_task calls loop() back-to-back, so without this it would spin at 100 % of core 1 doing
+   * nothing (core 1's idle task never runs). Everything polled here (WiFi status, scan results,
+   * NTP) changes on a ~100 ms scale, so 5 ms of sleep costs no responsiveness.
    */
   sleep_ms(5);
+}
+
+/* ---------- start-up (what the Arduino core used to do) ---------- */
+
+/** NVS holds the Wi-Fi radio calibration and is needed by Wi-Fi and BLE (credentials stay on SD). */
+static void nvs_init(void)
+{
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    /* Broken or newer-format NVS partition: erase it and start over. */
+    if (nvs_flash_erase() == ESP_OK) {
+      err = nvs_flash_init();
+    }
+  }
+  if (err != ESP_OK) {
+    serial_log("[app] NVS init failed: %s", esp_err_to_name(err));
+  }
+}
+
+/** setup() once, then loop() forever: core 1, priority 1, 8 KB stack (as the Arduino loopTask). */
+static void loop_task(void *arg)
+{
+  LV_UNUSED(arg);
+  setup();
+  for (;;) {
+    loop();
+  }
+}
+
+extern "C" void app_main(void)
+{
+  nvs_init();
+  xTaskCreatePinnedToCore(loop_task, "loopTask", 8192, nullptr, 1, nullptr, 1);
 }

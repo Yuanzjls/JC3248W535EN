@@ -1,5 +1,6 @@
 ## ESP-IDF component dependencies of the main component (fetched into managed_components/).
 dependencies:
-  # BLE (Airthings): C++ API over ESP-IDF's own NimBLE host. Same API as NimBLE-Arduino, which
-  # it replaces (that one bundled its own host and needed Arduino).
+  # BLE (Airthings): C++ API over ESP-IDF's own NimBLE host.
   h2zero/esp-nimble-cpp: "^2.5.0"
+  # JPEG decoder with ESP32-S3 SIMD (full-screen video frames).
+  espressif/esp_new_jpeg: "^1.0.2"
