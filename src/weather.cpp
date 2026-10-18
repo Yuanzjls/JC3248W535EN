@@ -299,7 +299,7 @@ void weather_begin(void) {
         return;
     }
     /* 10 KB: HTTP client + JSON parsing; low priority so it never competes with the UI. */
-    /* Core 1 (with Arduino loop): core 0 is busy with LVGL redraws and the WiFi stack. */
+    /* Core 1 (with the loop task): core 0 is busy with LVGL redraws and the WiFi stack. */
     xTaskCreatePinnedToCoreWithCaps(weather_task, "weather", 10240, nullptr, 1, &s_task, 1, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
 }
 

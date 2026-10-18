@@ -16,7 +16,7 @@
 #include "platform_time.h"
 
 /*
- * CPU usage from FreeRTOS run-time stats (enabled in the Arduino-ESP32 build, counted in esp_timer
+ * CPU usage from FreeRTOS run-time stats (enabled in sdkconfig.defaults, counted in esp_timer
  * microseconds). Each second: busy % of a core = 100 - (its idle task's run time / wall time).
  * Per-task shares come from the same counters, matched by task handle between samples.
  */

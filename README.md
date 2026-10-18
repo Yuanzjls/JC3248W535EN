@@ -1,15 +1,51 @@
-</head>
-<body>
-    <h1>JC3248W535EN - Minimal Platformio Project for Cheap Black Board</h1>
-    <p>Just fork and build!</p>
-    <p>The LVGL config file is included. Please copy it to the LVGL root folder to ensure correct colors.</p>
-    <p>This projrct WILL build on Arduino ESP32.</p>
-    <p>Below are some images and datasheets from the manufacturer:</p>
-    <div class="images">
-        <img src="images/front.jpg" alt="Front view">
-        <img src="images/back.jpg" alt="Back view">
-        <img src="images/JC3248W535-1.png" alt="Datasheet page 1">
-        <img src="images/JC3248W535-2.png" alt="Datasheet page 2">
-    </div>
-</body>
-</html>
+# JC3248W535EN - ESP32-S3 touch panel firmware
+
+Firmware for the Guition JC3248W535EN (a.k.a. "cheap black board"): ESP32-S3, 16 MB flash,
+8 MB octal PSRAM, 3.5" 480x320 QSPI display (AXS15231B) with capacitive touch, microSD slot.
+
+A small launcher with apps: Wi-Fi setup, Clock, Weather (Open-Meteo), Files (browser, image
+viewer, MJPEG video player), Breakout, Air (Airthings Wave radon sensor over BLE) and Settings.
+UI with LVGL 8.3.
+
+## Build
+
+Plain ESP-IDF 5.5 (CMake / FreeRTOS), built with PlatformIO (`framework = espidf`):
+
+```
+pio run            # build
+pio run -t upload  # flash over USB
+pio device monitor # logs (115200, USB Serial/JTAG)
+```
+
+On Windows run PlatformIO from PowerShell or cmd: the ESP-IDF build refuses Git Bash / MSYS.
+
+- Configuration: `sdkconfig.defaults` (the generated `sdkconfig.JC3248W535EN` is not versioned).
+- ESP-IDF components (`esp-nimble-cpp`, `esp_new_jpeg`): `src/idf_component.yml`, fetched into
+  `managed_components/` on the first build.
+- Libraries (LVGL, ArduinoJson, JPEGDEC, PNGdec): `lib_deps` in `platformio.ini`.
+- LVGL config: `include/lv_conf.h` (found through `LV_CONF_INCLUDE_SIMPLE`, nothing to copy).
+
+## microSD card
+
+Everything persistent lives on the card (FAT), nothing in internal flash:
+
+| File | |
+|---|---|
+| `fonts/UI_FONT_16.bin` | UI font with CJK (copy from `documentation/fonts/`) |
+| `wifi_known.txt` | saved Wi-Fi networks (written by the Wi-Fi app) |
+| `settings.ini`, `timezone.ini` | brightness, units, clock format, timezone |
+| `weather.ini` | optional: `lat`, `lon`, `name`, `units` (otherwise IP geolocation) |
+| `airthings.ini` | chosen radon sensor (written by the Air app) |
+| `breakout.ini` | high score |
+| `.cache/mjpeg/` | video frame indexes (rebuilt if deleted) |
+
+Videos: raw MJPEG (`.mjpeg` / `.mjpg`), ideally 480x320; `_15fps` in the file name sets the rate
+(default 24).
+
+## Hardware
+
+Datasheets and drawings from the manufacturer are in `documentation/`.
+
+<img src="images/front.jpg" alt="Front view" width="45%"> <img src="images/back.jpg" alt="Back view" width="45%">
+
+<img src="images/JC3248W535-1.png" alt="Datasheet page 1" width="45%"> <img src="images/JC3248W535-2.png" alt="Datasheet page 2" width="45%">

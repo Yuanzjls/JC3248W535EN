@@ -711,13 +711,12 @@ static void reader_task(void *arg) {
                 /* Playback is ahead (all slots full): use the time to index the file. */
                 if (index_scan_step(s_reader_path, s_file_size)) {
                     /*
-                     * Must sleep between chunks. Arduino SD reads busy-wait on SPI, so back-to-back
-                     * chunks kept this task (core 0, prio 2) running for seconds while paused, the
-                     * core-0 idle task never ran, and the 5 s task watchdog reset the chip mid-read -
-                     * which also left the SD card stuck so the next boot couldn't mount it.
+                     * Sleep between chunks. With the old Arduino SD library (busy-waiting SPI reads),
+                     * back-to-back chunks kept this task (core 0, prio 2) running for seconds, the
+                     * core-0 idle task never ran and the 5 s task watchdog reset the chip mid-read.
+                     * SD reads are DMA now, but the card's bandwidth is still shared with playback:
+                     * while playing, one chunk per 100 ms; full speed while paused.
                      */
-                    /* While playing, only one chunk per 100 ms: full-speed counting kept core 0 busy
-                     * (SD reads busy-wait) and starved the UI. Full speed while paused. */
                     vTaskDelay(pdMS_TO_TICKS(s_video_paused ? 2 : 100));
                     continue;
                 }
