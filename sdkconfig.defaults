@@ -569,7 +569,8 @@ CONFIG_ARDUHAL_PARTITION_SCHEME_DEFAULT=y
 CONFIG_ARDUHAL_PARTITION_SCHEME="default"
 # CONFIG_AUTOCONNECT_WIFI is not set
 CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
-# Arduino libraries used here: FS (fs::FS over VFS), Network, WiFi, NetworkClientSecure, HTTPClient.
+# Arduino libraries used here: FS (fs::FS over VFS), Network, NetworkClientSecure, HTTPClient.
+# Wi-Fi itself runs on esp_wifi (wifi_net.cpp).
 # BLE is NimBLE-Arduino (a PlatformIO library, not Arduino's BLE). Everything else is left out.
 # CONFIG_ARDUINO_SELECTIVE_SPI is not set
 # CONFIG_ARDUINO_SELECTIVE_Wire is not set
@@ -597,7 +598,7 @@ CONFIG_ARDUINO_SELECTIVE_HTTPClient=y
 # CONFIG_ARDUINO_SELECTIVE_Matter is not set
 # CONFIG_ARDUINO_SELECTIVE_NetBIOS is not set
 # CONFIG_ARDUINO_SELECTIVE_WebServer is not set
-CONFIG_ARDUINO_SELECTIVE_WiFi=y
+# CONFIG_ARDUINO_SELECTIVE_WiFi is not set
 CONFIG_ARDUINO_SELECTIVE_NetworkClientSecure=y
 # CONFIG_ARDUINO_SELECTIVE_WiFiProv is not set
 # CONFIG_ARDUINO_SELECTIVE_BLE is not set

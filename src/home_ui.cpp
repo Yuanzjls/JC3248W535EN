@@ -1,7 +1,6 @@
 #include "home_ui.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <time.h>
 
 #include "air_ui.h"

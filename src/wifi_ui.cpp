@@ -1,6 +1,6 @@
 #include "wifi_ui.h"
 
-#include <WiFi.h>
+#include <Arduino.h>
 #include <algorithm>
 #include <lvgl.h>
 #include <vector>
@@ -11,14 +11,8 @@
 #include "home_ui.h"
 #include "status_bar.h"
 #include "serial_log.h"
+#include "wifi_net.h"
 #include "wifi_store.h"
-
-#ifndef WIFI_SCAN_RUNNING
-#define WIFI_SCAN_RUNNING (-1)
-#endif
-#ifndef WIFI_SCAN_FAILED
-#define WIFI_SCAN_FAILED (-2)
-#endif
 
 struct ScanResult {
     String ssid;
@@ -126,7 +120,7 @@ static void connect_btn_cb(lv_event_t *e) {
     close_password_dialog();
 
     set_status_text("Connecting...");
-    /* WiFi.begin must run from Arduino loop(), not the LVGL task. */
+    /* Connecting runs from loop() (wifi_ui_loop), not the LVGL task. */
     s_pending_connect = true;
 }
 
@@ -306,19 +300,18 @@ static void scan_btn_cb(lv_event_t *e) {
 }
 
 /** Collect APs after async scan completes (ssid is proper UTF-8 from driver). */
-static std::vector<ScanResult> collect_and_sort(int n) {
+static std::vector<ScanResult> collect_and_sort(void) {
     std::vector<ScanResult> out;
-    if (n <= 0) {
-        return out;
-    }
+    int n = 0;
+    const wifi_ap_record_t *aps = wifi_net_scan_results(&n);
     for (int i = 0; i < n; i++) {
         ScanResult r;
-        r.ssid = WiFi.SSID(i);
+        r.ssid = (const char *)aps[i].ssid;
         if (r.ssid.length() == 0) {
             continue;
         }
-        r.rssi = WiFi.RSSI(i);
-        r.enc_type = WiFi.encryptionType(i);
+        r.rssi = aps[i].rssi;
+        r.enc_type = (uint8_t)aps[i].authmode;
         (void)r.enc_type;
         out.push_back(r);
     }
@@ -349,22 +342,12 @@ static void start_async_scan(void) {
     s_scan_busy = true;
     s_waiting_scan_complete = false;
 
-    WiFi.mode(WIFI_STA);
-    int16_t r = WiFi.scanNetworks(true, true, false, 120);
-
-    if (r == WIFI_SCAN_FAILED) {
+    if (!wifi_net_scan_start(true /*hidden*/, 120 /*ms/channel*/)) {
         s_scan_busy = false;
         publish_results({});
         return;
     }
-    if (r == WIFI_SCAN_RUNNING) {
-        s_waiting_scan_complete = true;
-        return;
-    }
-    /* Unusual: count returned immediately */
-    std::vector<ScanResult> results = collect_and_sort(r);
-    s_scan_busy = false;
-    publish_results(std::move(results));
+    s_waiting_scan_complete = true;
 }
 
 /** Poll async scan; call from loop() every iteration. */
@@ -373,34 +356,43 @@ static void poll_async_scan(void) {
         return;
     }
 
-    int16_t c = WiFi.scanComplete();
-    if (c == WIFI_SCAN_RUNNING) {
-        yield();
+    const int c = wifi_net_scan_poll();
+    if (c == -1) {
         return;
     }
 
     s_waiting_scan_complete = false;
     s_scan_busy = false;
 
-    if (c == WIFI_SCAN_FAILED) {
+    if (c < 0) {
         publish_results({});
         return;
     }
 
-    publish_results(collect_and_sort(c));
+    publish_results(collect_and_sort());
+}
+
+/** "Connected: <ssid>\nIP a.b.c.d" for the status label. */
+static String connected_msg(void) {
+    char ssid[33], ip[16];
+    wifi_net_ssid(ssid, sizeof(ssid));
+    wifi_net_ip(ip, sizeof(ip));
+    return String("Connected: ") + ssid + "\nIP " + ip;
 }
 
 static void poll_connection(void) {
-    wl_status_t st = WiFi.status();
+    bool connected = wifi_net_connected();
 
     if (s_conn == ConnState::Connecting) {
         if (wifi_store_autoconnect_active()) {
             wifi_store_autoconnect_poll();
-            st = WiFi.status();
-            if (st == WL_CONNECTED) {
+            connected = wifi_net_connected();
+            if (connected) {
                 s_conn = ConnState::Connected;
-                wifi_store_promote(WiFi.SSID());
-                String msg = String("Connected: ") + WiFi.SSID() + "\nIP " + WiFi.localIP().toString();
+                char ssid[33];
+                wifi_net_ssid(ssid, sizeof(ssid));
+                wifi_store_promote(String(ssid));
+                String msg = connected_msg();
                 bsp_display_lock(0);
                 set_status_string(msg);
                 if (s_status_lbl) {
@@ -424,13 +416,13 @@ static void poll_connection(void) {
             return;
         }
 
-        if (st == WL_CONNECTED) {
+        if (connected) {
             s_conn = ConnState::Connected;
             if (s_connect_from_manual) {
                 wifi_store_save(s_attempt_ssid, s_attempt_password);
                 s_connect_from_manual = false;
             }
-            String msg = String("Connected: ") + WiFi.SSID() + "\nIP " + WiFi.localIP().toString();
+            String msg = connected_msg();
             bsp_display_lock(0);
             set_status_string(msg);
             if (s_status_lbl) {
@@ -454,51 +446,29 @@ static void poll_connection(void) {
         return;
     }
 
-    if (s_conn == ConnState::Connected && st != WL_CONNECTED) {
+    if (s_conn == ConnState::Connected && !connected) {
         s_conn = ConnState::Idle;
         clock_ui_on_wifi_lost();
         bsp_display_lock(0);
-        set_status_text("WiFi lost - tap Scan");
+        set_status_text("WiFi lost - reconnecting...");
         if (s_status_lbl) {
             lv_obj_set_style_text_font(s_status_lbl, ui_font_get(), 0);
         }
         bsp_display_unlock();
-    }
-}
-
-/** Log WiFi driver events (runs on the WiFi event task) so connect failures show their cause. */
-static void wifi_event_log(arduino_event_id_t event, arduino_event_info_t info) {
-    switch (event) {
-    case ARDUINO_EVENT_WIFI_STA_START:
-        serial_log("[wifi] STA started");
-        break;
-    case ARDUINO_EVENT_WIFI_STA_STOP:
-        serial_log("[wifi] STA stopped");
-        break;
-    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-        serial_log("[wifi] associated with AP (channel %d, RSSI %d dBm)", (int)info.wifi_sta_connected.channel, (int)WiFi.RSSI());
-        break;
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-        serial_log("[wifi] disconnected, reason %d (%s)", (int)info.wifi_sta_disconnected.reason,
-                   WiFi.disconnectReasonName((wifi_err_reason_t)info.wifi_sta_disconnected.reason));
-        break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-        serial_log("[wifi] got IP %s", WiFi.localIP().toString().c_str());
-        break;
-    default:
-        break;
+    } else if (s_conn != ConnState::Connected && connected) {
+        /* Back by itself: wifi_net reconnects after a lost connection. */
+        s_conn = ConnState::Connected;
+        String msg = connected_msg();
+        bsp_display_lock(0);
+        set_status_string(msg);
+        bsp_display_unlock();
+        clock_ui_on_wifi_connected();
     }
 }
 
 void wifi_ui_init(void) {
-    WiFi.onEvent(wifi_event_log);
-    /* Credentials live on SD (wifi_store); stop the core also copying them into internal flash. */
-    WiFi.persistent(false);
-    /* Radio stays on from here; reconnect paths use disconnect(false) so it is never stopped/restarted. */
-    WiFi.mode(WIFI_STA);
-    /* No modem power-save: dozing between beacons can miss the AP's auth replies (AUTH_EXPIRE,
-     * slow joins). USB powered with the screen on, so the extra current does not matter. */
-    WiFi.setSleep(false);
+    /* ESP-IDF Wi-Fi: STA mode, no power-save, credentials only on SD (see wifi_net.h). */
+    wifi_net_init();
 
     /* Own screen (opened from the home screen); built now so status updates land even while hidden. */
     s_wifi_scr = lv_obj_create(nullptr);
@@ -539,6 +509,8 @@ void wifi_ui_open(void) {
 }
 
 void wifi_ui_loop(void) {
+    wifi_net_poll(); /* Wi-Fi event log */
+
     if (!s_wifi_auto_started) {
         s_wifi_auto_started = true;
         wifi_store_begin();
@@ -563,10 +535,6 @@ void wifi_ui_loop(void) {
         bsp_display_unlock();
         s_connect_from_manual = true;
 
-        /* Drop the current association only. disconnect(true) turns the radio off, and restarting it right
-         * away races the async STA_STOP event, leaving the driver "not started" (connect silently fails). */
-        WiFi.disconnect(false);
-
         if (s_attempt_ssid.length() == 0) {
             s_conn = ConnState::Failed;
             s_connect_from_manual = false;
@@ -576,11 +544,8 @@ void wifi_ui_loop(void) {
             return;
         }
 
-        if (s_attempt_password.length() > 0) {
-            WiFi.begin(s_attempt_ssid.c_str(), s_attempt_password.c_str());
-        } else {
-            WiFi.begin(s_attempt_ssid.c_str());
-        }
+        /* Drops the current association (radio stays on), then connects. */
+        (void)wifi_net_connect(s_attempt_ssid.c_str(), s_attempt_password.c_str(), 0, nullptr);
         s_conn = ConnState::Connecting;
         s_connect_start_ms = millis();
     }

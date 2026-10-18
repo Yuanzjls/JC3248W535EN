@@ -1,7 +1,7 @@
 #include "status_bar.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
+#include "wifi_net.h"
 #include <time.h>
 
 #include "home_ui.h"
@@ -36,7 +36,7 @@ static StatusBar *find_bar(lv_obj_t *bar) {
 static void update_bar(StatusBar &b) {
     lv_label_set_text(b.weather, weather_ui_tile_text());
 
-    const bool connected = WiFi.status() == WL_CONNECTED;
+    const bool connected = wifi_net_connected();
     lv_obj_set_style_text_color(b.wifi, connected ? ui_color_text() : ui_color_tick(), 0);
 
     const time_t now = time(nullptr);

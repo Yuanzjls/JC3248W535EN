@@ -1,7 +1,7 @@
 #include "app_settings.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
+#include "wifi_net.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -136,8 +136,11 @@ static void sync_from_state(void) {
     }
 
     String about = "WiFi  ";
-    if (WiFi.status() == WL_CONNECTED) {
-        about += WiFi.SSID() + "  (" + WiFi.localIP().toString() + ", " + String(WiFi.RSSI()) + " dBm)";
+    if (wifi_net_connected()) {
+        char ssid[33], ip[16];
+        wifi_net_ssid(ssid, sizeof(ssid));
+        wifi_net_ip(ip, sizeof(ip));
+        about += String(ssid) + "  (" + ip + ", " + String(wifi_net_rssi()) + " dBm)";
     } else {
         about += "not connected";
     }

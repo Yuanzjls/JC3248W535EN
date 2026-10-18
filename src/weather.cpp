@@ -3,7 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include "sd_card.h"
-#include <WiFi.h>
+#include "wifi_net.h"
 
 #include "esp_bsp.h"
 #include "serial_log.h"
@@ -242,7 +242,7 @@ static void weather_task(void *arg) {
     static WeatherData wd; /* static: keep the struct off the task stack */
 
     for (;;) {
-        if (WiFi.status() != WL_CONNECTED) {
+        if (!wifi_net_connected()) {
             if (strcmp((const char *)s_status, "Waiting for WiFi") != 0) {
                 set_status("Waiting for WiFi");
             }

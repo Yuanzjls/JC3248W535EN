@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <string.h>
 #include <vector>
-#include <WiFi.h>
+#include <Arduino.h>
+
+#include "wifi_net.h"
 
 #include "serial_log.h"
 
@@ -221,15 +223,17 @@ static const uint32_t k_ac_scan_timeout_ms = 6000;
  * fails with "sta is connecting, cannot set config". */
 static const uint32_t k_ac_settle_ms = 800;
 
-static void build_candidates(int n) {
+static void build_candidates(void) {
+    int n = 0;
+    const wifi_ap_record_t *aps = wifi_net_scan_results(&n);
     s_ac_list.clear();
     for (size_t k = 0; k < s_known.size(); k++) {
         AcCandidate c = {k, -127, 0, {0}, false};
         for (int i = 0; i < n; i++) {
-            if (WiFi.SSID(i) == s_known[k].first && WiFi.RSSI(i) > c.rssi) {
-                c.rssi = WiFi.RSSI(i);
-                c.channel = WiFi.channel(i);
-                memcpy(c.bssid, WiFi.BSSID(i), sizeof(c.bssid));
+            if (strcmp((const char *)aps[i].ssid, s_known[k].first.c_str()) == 0 && aps[i].rssi > c.rssi) {
+                c.rssi = aps[i].rssi;
+                c.channel = aps[i].primary;
+                memcpy(c.bssid, aps[i].bssid, sizeof(c.bssid));
                 c.seen = true;
             }
         }
@@ -257,11 +261,7 @@ static void begin_candidate(void) {
     const auto &net = s_known[c.idx];
     serial_log("[wifi] trying saved \"%s\" (%u/%u)%s", net.first.c_str(), (unsigned)(s_ac_i + 1),
                (unsigned)s_ac_list.size(), c.seen ? "" : " - not in scan, trying anyway");
-    if (c.seen) {
-        WiFi.begin(net.first.c_str(), net.second.c_str(), c.channel, c.bssid);
-    } else {
-        WiFi.begin(net.first.c_str(), net.second.c_str());
-    }
+    (void)wifi_net_connect(net.first.c_str(), net.second.c_str(), c.seen ? c.channel : 0, c.seen ? c.bssid : nullptr);
     s_ac_state = AcState::Connecting;
     s_ac_deadline = millis() + k_ac_timeout_ms;
 }
@@ -273,16 +273,12 @@ bool wifi_store_autoconnect_start(void) {
     if (s_known.empty()) {
         return false;
     }
-    /* disconnect(false): keep the radio on. disconnect(true) stops WiFi, and restarting it right away
-     * races the async STA_STOP event, leaving the driver "not started" so connect silently fails. */
-    WiFi.disconnect(false);
-    WiFi.mode(WIFI_STA);
+    wifi_net_disconnect(); /* association only: the radio stays on */
     s_ac_i = 0;
     s_ac_scan_start = millis();
-    const int16_t r = WiFi.scanNetworks(true /*async*/, false /*hidden*/, false /*passive*/, 120 /*ms/channel*/);
-    if (r == WIFI_SCAN_FAILED) {
+    if (!wifi_net_scan_start(false /*hidden*/, 120 /*ms/channel*/)) {
         serial_log("[wifi] scan failed, trying saved networks in order");
-        build_candidates(0);
+        build_candidates();
         s_ac_state = AcState::Settling;
         s_ac_deadline = millis() + k_ac_settle_ms;
     } else {
@@ -298,18 +294,18 @@ bool wifi_store_autoconnect_poll(void) {
         return false;
 
     case AcState::Scanning: {
-        const int16_t n = WiFi.scanComplete();
-        if (n == WIFI_SCAN_RUNNING && millis() - s_ac_scan_start < k_ac_scan_timeout_ms) {
+        const int n = wifi_net_scan_poll();
+        if (n == -1 && millis() - s_ac_scan_start < k_ac_scan_timeout_ms) {
             return true;
         }
-        serial_log("[wifi] scan done in %lu ms, %d AP(s)", (unsigned long)(millis() - s_ac_scan_start), (int)n);
-        build_candidates(n > 0 ? n : 0);
+        serial_log("[wifi] scan done in %lu ms, %d AP(s)", (unsigned long)(millis() - s_ac_scan_start), n);
+        build_candidates();
         begin_candidate();
         return true;
     }
 
     case AcState::Connecting:
-        if (WiFi.status() == WL_CONNECTED) {
+        if (wifi_net_connected()) {
             s_ac_state = AcState::Idle;
             return false;
         }
@@ -317,7 +313,7 @@ bool wifi_store_autoconnect_poll(void) {
             return true;
         }
         serial_log("[wifi] no luck after %lu s", (unsigned long)(k_ac_timeout_ms / 1000));
-        WiFi.disconnect(false);
+        wifi_net_disconnect();
         if (++s_ac_i >= s_ac_list.size()) {
             s_ac_state = AcState::Idle;
             return false;
