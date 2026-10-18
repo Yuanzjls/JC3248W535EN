@@ -626,6 +626,7 @@ void lvgl_port_flush_frame(lv_disp_t *disp, const lv_color_t *frame)
     flush_area(disp->driver, &area, (lv_color_t *)frame);
 }
 
+
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
 static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 {
@@ -637,12 +638,19 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
     uint16_t touchpad_y[1] = {0};
     uint8_t touchpad_cnt = 0;
 
-    /* Read data from touch controller into memory */
+    /*
+     * Read the controller over I2C only after an interrupt (TP_INT edge), or while a finger is
+     * down: the controller may not pulse INT for every move or for the release, so keep reading
+     * until it reports no touch. Idle screens then do no I2C at all.
+     */
+    static bool s_touch_active = false;
     bool touch_int = false;
     if (touch_ctx->touch_wait_cb) {
         touch_int = touch_ctx->touch_wait_cb(touch_ctx->handle->config.user_data);
     }
-    if (touch_int) {
+    if (!touch_int && !s_touch_active) {
+        data->state = LV_INDEV_STATE_RELEASED;
+    } else {
         esp_lcd_touch_read_data(touch_ctx->handle);
         /* Read data from touch controller */
         bool touchpad_pressed = esp_lcd_touch_get_coordinates(touch_ctx->handle, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
@@ -665,6 +673,7 @@ static void lvgl_port_touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *
             data->state = LV_INDEV_STATE_RELEASED;
             was_pressed = false;
         }
+        s_touch_active = was_pressed;
     }
 }
 #endif

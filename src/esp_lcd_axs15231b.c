@@ -421,7 +421,9 @@ esp_err_t esp_lcd_touch_new_i2c_axs15231b(const esp_lcd_panel_io_handle_t io, co
         const gpio_config_t int_gpio_config = {
             .mode = GPIO_MODE_INPUT,
             .intr_type = GPIO_INTR_NEGEDGE,
-            .pin_bit_mask = BIT64(axs15231b->config.int_gpio_num)
+            .pin_bit_mask = BIT64(axs15231b->config.int_gpio_num),
+            /* The schematic shows no pull-up on TP_INT: keep the line defined if it's open-drain */
+            .pull_up_en = GPIO_PULLUP_ENABLE,
         };
         ESP_GOTO_ON_ERROR(gpio_config(&int_gpio_config), err, TAG, "GPIO intr config failed");
 

@@ -6,6 +6,8 @@
 #include <cstring>
 
 extern "C" void serial_log_init(void) {
+    /* Room for bursts of log lines, so serial_log() returns without waiting for the host. */
+    Serial.setTxBufferSize(4096);
     Serial.begin(115200);
     /* Host often opens the COM port after the chip boots; wait so early lines are not lost. */
     delay(800);
@@ -29,5 +31,5 @@ extern "C" void serial_log(const char *fmt, ...) {
     if (need_nl) {
         Serial.print("\n");
     }
-    Serial.flush();
+    /* No flush(): waiting for the host to drain each line stalled the caller (LVGL, video...). */
 }

@@ -15,6 +15,7 @@
 #include "app_settings.h"
 #include "airthings.h"
 #include "sysmon.h"
+#include <esp_debug_helpers.h>
 
 
 
@@ -191,6 +192,13 @@ static void ui_watchdog_task(void *arg)
       last_warn = stuck_ms;
       serial_log("[ui] WATCHDOG: LVGL task stuck %lu s, %s (display lock held by: %s)",
                  (unsigned long)(stuck_ms / 1000), lvgl_port_stage_name(stage), holder);
+      /* Once per boot: every task's call stack, to see where exactly it waits (decode with addr2line). */
+      static bool s_dumped;
+      if (!s_dumped) {
+        s_dumped = true;
+        delay(100);
+        esp_backtrace_print_all_tasks(16);
+      }
     }
     if (stuck_ms >= k_restart_ms) {
       serial_log("[ui] WATCHDOG: UI frozen for %lu s - restarting", (unsigned long)(stuck_ms / 1000));

@@ -44,7 +44,7 @@
 #define EXAMPLE_PIN_NUM_QSPI_TOUCH_SCL  (GPIO_NUM_8)
 #define EXAMPLE_PIN_NUM_QSPI_TOUCH_SDA  (GPIO_NUM_4)
 #define EXAMPLE_PIN_NUM_QSPI_TOUCH_RST  (-1)
-#define EXAMPLE_PIN_NUM_QSPI_TOUCH_INT  (-1)
+#define EXAMPLE_PIN_NUM_QSPI_TOUCH_INT  (GPIO_NUM_3)   /* TP_INT via R17 (0R) on the schematic */
 
 #ifdef __cplusplus
 extern "C" {

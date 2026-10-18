@@ -3,6 +3,7 @@
 #include <lvgl.h> /* before PNGdec: see the #undef below */
 
 #include <JPEGDEC.h>
+#include <esp_jpeg_dec.h>
 #include <PNGdec.h>
 /* PNGdec's bundled zlib does `#define local static` in a public header. LVGL (lv_meter.h) has a
  * parameter named `local`, so keep the macro from leaking into anything included later. */
@@ -737,6 +738,18 @@ static void reader_task(void *arg) {
     }
 }
 
+/* Show task state (see show_task below) */
+static const uint8_t k_fb_drain = 0xFE; /* media -> show: return every buffer (end of playback) */
+static QueueHandle_t s_fb_free_q = nullptr;
+static QueueHandle_t s_fb_show_q = nullptr;
+static TaskHandle_t s_shower = nullptr;
+static volatile uint32_t s_frame_ms = 1000 / k_default_fps;
+static volatile uint32_t s_shown = 0;   /* stats, reset by the media task */
+static volatile uint32_t s_show_ms = 0;
+static volatile int s_last_fb = 0;      /* buffer last put on screen */
+static const int k_frames = 2;          /* see show_task */
+static void show_task(void *arg);
+
 static bool video_begin(void) {
     if (s_reader) {
         return true;
@@ -759,26 +772,82 @@ static bool video_begin(void) {
     s_reader_done = xSemaphoreCreateBinary();
     /* Core 0: LVGL is nearly idle there while the direct path plays; priority below LVGL. */
     xTaskCreatePinnedToCoreWithCaps(reader_task, "media_rd", 6144, nullptr, 2, &s_reader, 0, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
+    s_fb_free_q = xQueueCreate(k_frames, sizeof(uint8_t));
+    s_fb_show_q = xQueueCreate(k_frames + 1, sizeof(uint8_t)); /* every buffer + the drain marker */
+    /* Core 0 next to LVGL (nearly idle while frames go direct), below LVGL, above the reader. */
+    xTaskCreatePinnedToCoreWithCaps(show_task, "media_sh", 4096, nullptr, 3, &s_shower, 0, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash here */
     return true;
 }
 
-/** Show the frame in s_frame[s_back]: direct to the panel, or through LVGL if the overlay is up. */
-static uint32_t show_video_frame(void) {
-    const uint32_t t0 = millis();
+/**
+ * Show s_frame[fb]: direct to the panel, or through LVGL if the overlay is up. Returns true for the
+ * LVGL path: LVGL then still reads the buffer on its next refresh, so it must stay untouched until
+ * another frame replaces it.
+ */
+static bool show_video_frame(int fb) {
     bsp_display_lock(0);
     if (!s_img) { /* screen already released */
         bsp_display_unlock();
-        return 0;
+        return false;
     }
-    s_video_dsc.data = (const uint8_t *)s_frame[s_back];
+    s_video_dsc.data = (const uint8_t *)s_frame[fb];
+    bool via_lvgl = false;
     if (s_overlay_on || lv_scr_act() != s_scr) {
         lv_obj_invalidate(s_img);
+        via_lvgl = true;
     } else {
-        lvgl_port_flush_frame(lv_disp_get_default(), (const lv_color_t *)s_frame[s_back]);
+        lvgl_port_flush_frame(lv_disp_get_default(), (const lv_color_t *)s_frame[fb]);
     }
     bsp_display_unlock();
-    s_back ^= 1;
-    return millis() - t0;
+    return via_lvgl;
+}
+
+/*
+ * Show task (core 0): decode and show run in parallel. The media task (core 1) decodes into a free
+ * frame buffer and queues it here (s_fb_show_q); this task waits for the frame's due time, sends it
+ * to the panel and hands the buffer back (s_fb_free_q). With two buffers the decoder fills one while
+ * the other is being sent, so a frame costs max(decode, show) instead of decode + show.
+ * Every decoded frame is shown, in order (no skipping).
+ */
+static void show_task(void *arg) {
+    LV_UNUSED(arg);
+    int held = -1; /* buffer LVGL may still read (overlay path) */
+    uint32_t next_due = millis();
+    for (;;) {
+        uint8_t fb;
+        if (xQueueReceive(s_fb_show_q, &fb, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (fb == k_fb_drain) {
+            if (held >= 0) {
+                const uint8_t h = (uint8_t)held;
+                xQueueSend(s_fb_free_q, &h, 0);
+                held = -1;
+            }
+            next_due = millis();
+            continue;
+        }
+        const int32_t wait = (int32_t)(next_due - millis());
+        if (wait > 0) {
+            vTaskDelay(pdMS_TO_TICKS(wait));
+        }
+        next_due = millis() + s_frame_ms;
+        const uint32_t t0 = millis();
+        const bool via_lvgl = show_video_frame(fb);
+        s_last_fb = fb;
+        s_show_ms = s_show_ms + (millis() - t0);
+        s_shown = s_shown + 1;
+        if (held >= 0) { /* replaced on screen: free again */
+            const uint8_t h = (uint8_t)held;
+            xQueueSend(s_fb_free_q, &h, 0);
+            held = -1;
+        }
+        if (via_lvgl) {
+            held = fb;
+        } else {
+            xQueueSend(s_fb_free_q, &fb, 0); /* already copied out to the panel */
+        }
+    }
 }
 
 static void fmt_time(char *buf, size_t n, uint32_t s) {
@@ -828,10 +897,19 @@ static void play_video(const char *path) {
     s_index_done = false; /* the reader re-checks the cache / rescans for this file */
     s_index_count = 0;
     xTaskNotifyGive(s_reader);
+    /* Both frame buffers free; the show task is idle (drained at the end of the last video). */
+    xQueueReset(s_fb_free_q);
+    xQueueReset(s_fb_show_q);
+    for (uint8_t i = 0; i < k_frames; i++) {
+        xQueueSend(s_fb_free_q, &i, 0);
+    }
+    s_shown = 0;
+    s_show_ms = 0;
 
     /* Black letterbox; lv_img shows the full-screen buffer. */
-    memset(s_frame[0], 0, (size_t)k_scr_w * k_scr_h * 2);
-    memset(s_frame[1], 0, (size_t)k_scr_w * k_scr_h * 2);
+    for (int i = 0; i < k_frames; i++) {
+        memset(s_frame[i], 0, (size_t)k_scr_w * k_scr_h * 2);
+    }
     bsp_display_lock(0);
     memset(&s_video_dsc, 0, sizeof(s_video_dsc));
     s_video_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
@@ -844,12 +922,15 @@ static void play_video(const char *path) {
     bsp_display_unlock();
 
     const int fps = fps_from_name(path);
-    const uint32_t frame_ms = 1000 / fps;
+    s_frame_ms = 1000 / fps; /* pacing happens in the show task */
     int scale = 0, src_w = 0, src_h = 0, vw = 0, vh = 0, ox = 0, oy = 0;
+    /* esp_new_jpeg (SIMD), used when the frames fill the screen exactly; ~9 KB internal RAM. */
+    bool use_njpeg = false;
+    jpeg_dec_handle_t njpeg = nullptr;
     bool paused = false, first = true;
     bool show_one = false; /* paused + seek: still show the frame at the new position */
-    uint32_t frames = 0, decode_ms = 0, show_ms = 0, frame_bytes = 0, starved = 0;
-    uint32_t stat_t0 = millis(), log_t0 = millis(), next_due = millis(), progress_t0 = 0;
+    uint32_t decoded = 0, decode_ms = 0, frame_bytes = 0, starved = 0;
+    uint32_t stat_t0 = millis(), log_t0 = millis(), progress_t0 = 0;
     /*
      * Time display. Raw MJPEG has no timestamps, so:
      *  - elapsed counts the frames actually played (exact, always moves forward); only a seek
@@ -876,7 +957,6 @@ static void play_video(const char *path) {
                 paused = !paused;
                 s_video_paused = paused;
                 ui_info(paused ? "Paused" : "Playing");
-                next_due = millis();
                 continue;
             }
             if (c.cmd == Cmd::Seek) {
@@ -900,7 +980,6 @@ static void play_video(const char *path) {
                 s_seek_req = true; /* reader jumps there; frames from before are dropped below */
                 show_one = paused;
                 need_anchor = true;
-                next_due = millis();
                 progress_t0 = 0; /* refresh the bar as soon as the new frame shows */
                 continue;
             }
@@ -938,22 +1017,66 @@ static void play_video(const char *path) {
         have_frame = true;
         last_off = cur_off;
 
-        const uint32_t t0 = millis();
-        const bool opened = s_jpeg->openRAM(s_slot_data[slot], (int)s_slot_len[slot], jpeg_draw_cb);
-        if (opened && scale == 0) {
-            src_w = s_jpeg->getWidth();
-            src_h = s_jpeg->getHeight();
-            scale = jpeg_scale_for(src_w, src_h, k_scr_w, k_scr_h);
-            vw = (src_w + scale - 1) / scale;
-            vh = (src_h + scale - 1) / scale;
-            if (vw > k_scr_w) vw = k_scr_w; /* odd sizes: crop the overflow */
-            if (vh > k_scr_h) vh = k_scr_h;
-            ox = (k_scr_w - vw) / 2;
-            oy = (k_scr_h - vh) / 2;
+        /* A free frame buffer: waits here while the show task still sends both (decoder ahead). */
+        uint8_t fb;
+        if (xQueueReceive(s_fb_free_q, &fb, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            serial_log("[media] no free frame buffer (show task stuck?)");
+            xQueueSend(s_free_q, &slot, 0);
+            continue;
         }
+
+        const uint32_t t0 = millis();
         int ok = 0;
-        if (opened) {
-            JpegTarget t = {s_frame[s_back] + (size_t)oy * k_scr_w + ox, k_scr_w, vw, vh};
+        if (use_njpeg) {
+            /* Full-screen frames: Espressif's SIMD decoder, straight into the frame buffer. */
+            jpeg_dec_io_t io = {};
+            io.inbuf = s_slot_data[slot];
+            io.inbuf_len = (int)s_slot_len[slot];
+            jpeg_dec_header_info_t hi;
+            jpeg_error_t err = jpeg_dec_parse_header(njpeg, &io, &hi);
+            if (err == JPEG_ERR_OK && (hi.width != k_scr_w || hi.height != k_scr_h)) {
+                err = JPEG_ERR_UNSUPPORT_FMT; /* size changed mid-file */
+            }
+            if (err == JPEG_ERR_OK) {
+                io.outbuf = (uint8_t *)s_frame[fb];
+                err = jpeg_dec_process(njpeg, &io);
+            }
+            ok = err == JPEG_ERR_OK;
+            if (!ok) {
+                static uint32_t s_fail_log_ms = 0;
+                if (millis() - s_fail_log_ms > 2000) { /* never silent: a failing decoder looked like low fps */
+                    s_fail_log_ms = millis();
+                    serial_log("[media] frame decode failed (esp_new_jpeg error %d, %dx%d)", (int)err, hi.width, hi.height);
+                }
+            }
+        } else if (s_jpeg->openRAM(s_slot_data[slot], (int)s_slot_len[slot], jpeg_draw_cb)) {
+            if (scale == 0) { /* first frame: pick the decoder and the letterbox */
+                src_w = s_jpeg->getWidth();
+                src_h = s_jpeg->getHeight();
+                scale = jpeg_scale_for(src_w, src_h, k_scr_w, k_scr_h);
+                vw = (src_w + scale - 1) / scale;
+                vh = (src_h + scale - 1) / scale;
+                if (vw > k_scr_w) vw = k_scr_w; /* odd sizes: crop the overflow */
+                if (vh > k_scr_h) vh = k_scr_h;
+                ox = (k_scr_w - vw) / 2;
+                oy = (k_scr_h - vh) / 2;
+                if (src_w == k_scr_w && src_h == k_scr_h) {
+                    const size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                    jpeg_dec_config_t cfg = DEFAULT_JPEG_DEC_CONFIG();
+                    cfg.output_type = JPEG_PIXEL_FORMAT_RGB565_BE;
+                    use_njpeg = jpeg_dec_open(&cfg, &njpeg) == JPEG_ERR_OK;
+                    if (!use_njpeg) {
+                        njpeg = nullptr;
+                    }
+                    serial_log("[media] esp_new_jpeg: %s, takes %u B internal RAM (internal free %u B, largest DMA block %u B)",
+                               use_njpeg ? "open" : "open FAILED", (unsigned)(before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+                }
+                serial_log("[media] %dx%d frames, decoder: %s", src_w, src_h,
+                           use_njpeg ? "esp_new_jpeg (SIMD)" : "JPEGDEC (letterboxed)");
+            }
+            JpegTarget t = {s_frame[fb] + (size_t)oy * k_scr_w + ox, k_scr_w, vw, vh};
             s_jpeg->setPixelType(RGB565_BIG_ENDIAN);
             s_jpeg->setUserPointer(&t);
             ok = s_jpeg->decode(0, 0, jpeg_option(scale));
@@ -963,20 +1086,15 @@ static void play_video(const char *path) {
         xQueueSend(s_free_q, &slot, 0); /* data consumed: let the reader refill it */
         decode_ms += millis() - t0;
         if (!ok) {
+            xQueueSend(s_fb_free_q, &fb, 0);
             continue; /* corrupt frame: skip */
         }
-
-        const int32_t wait = (int32_t)(next_due - millis());
-        if (wait > 0) {
-            vTaskDelay(pdMS_TO_TICKS(wait));
-        }
-        next_due = millis() + frame_ms;
+        decoded++;
         if (first) {
             first = false;
             ui_message("");
         }
-        show_ms += show_video_frame();
-        frames++;
+        xQueueSend(s_fb_show_q, &fb, portMAX_DELAY); /* show task paces and sends it */
         show_one = false;
 
         const uint32_t now = millis();
@@ -1003,27 +1121,47 @@ static void play_video(const char *path) {
                 ui_progress(size ? (int)((uint64_t)cur_off * 1000 / size) : 0, elapsed_s, shown_total_s, false);
             }
         }
+        const uint32_t shown = s_shown;
         if (now - stat_t0 >= 1000 && s_overlay_on) {
             char info[64];
-            snprintf(info, sizeof(info), "%dx%d  -  %.1f fps", src_w, src_h, frames * 1000.0f / (now - log_t0));
+            snprintf(info, sizeof(info), "%dx%d  -  %.1f fps", src_w, src_h, shown * 1000.0f / (now - log_t0));
             ui_info(info);
             stat_t0 = now;
         }
         if (now - log_t0 >= 5000) {
-            const uint32_t n = frames ? frames : 1;
-            serial_log("[media] %.1f fps | decode %lu ms, show %lu ms | frame %lu KB, SD %lu KB/s | waited for SD %lux",
-                       frames * 1000.0f / (now - log_t0), (unsigned long)(decode_ms / n), (unsigned long)(show_ms / n),
+            const uint32_t n = decoded ? decoded : 1;
+            const uint32_t ns = shown ? shown : 1;
+            serial_log("[media] %.1f fps | decode %lu ms, show %lu ms (in parallel) | frame %lu KB, SD %lu KB/s | waited for SD %lux",
+                       shown * 1000.0f / (now - log_t0), (unsigned long)(decode_ms / n), (unsigned long)(s_show_ms / ns),
                        (unsigned long)(frame_bytes / n / 1024),
                        (unsigned long)(s_read_ms ? s_read_bytes / s_read_ms : 0), (unsigned long)starved);
-            frames = decode_ms = show_ms = frame_bytes = starved = 0;
+            decoded = decode_ms = frame_bytes = starved = 0;
+            s_shown = 0;
+            s_show_ms = 0;
             s_read_bytes = s_read_ms = 0;
             log_t0 = now;
         }
     }
 
+    if (njpeg) {
+        jpeg_dec_close(njpeg);
+    }
+
     /* Stop the reader and wait until it has closed the file. */
     s_reader_stop = true;
     xSemaphoreTake(s_reader_done, portMAX_DELAY);
+
+    /* Let the show task finish queued frames and return both buffers: idle before the next file
+     * (or before the buffers are freed). */
+    const uint8_t drain = k_fb_drain;
+    xQueueSend(s_fb_show_q, &drain, portMAX_DELAY);
+    for (int i = 0; i < k_frames; i++) {
+        uint8_t fb;
+        if (xQueueReceive(s_fb_free_q, &fb, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            serial_log("[media] show task did not return frame buffer %d", i);
+        }
+    }
+    s_back = s_last_fb == 0 ? 1 : 0; /* a still image next decodes into a buffer that is not on screen */
 }
 
 /* ---------- task ---------- */
@@ -1035,7 +1173,8 @@ static bool ensure_decoders(void) {
     }
     for (int i = 0; i < 2; i++) {
         if (!s_frame[i]) {
-            s_frame[i] = (uint16_t *)psram_alloc((size_t)k_scr_w * k_scr_h * 2);
+            /* 16-byte aligned: esp_new_jpeg writes its output with SIMD stores */
+            s_frame[i] = (uint16_t *)heap_caps_aligned_alloc(16, (size_t)k_scr_w * k_scr_h * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         }
     }
     if (!s_jpeg) {
@@ -1073,6 +1212,13 @@ static void media_release_buffers(void) {
         vSemaphoreDelete(s_reader_done);
         s_free_q = s_full_q = nullptr;
         s_reader_done = nullptr;
+    }
+    if (s_shower) {
+        vTaskDeleteWithCaps(s_shower); /* idle: play_video() drained it */
+        s_shower = nullptr;
+        vQueueDelete(s_fb_free_q);
+        vQueueDelete(s_fb_show_q);
+        s_fb_free_q = s_fb_show_q = nullptr;
     }
     auto release = [](void *p) {
         if (p) {
