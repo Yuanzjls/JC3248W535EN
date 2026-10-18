@@ -1,6 +1,5 @@
 #include "sd_card.h"
 
-#include <Arduino.h>
 #include <driver/gpio.h>
 #include <driver/sdmmc_host.h>
 #include <driver/sdspi_host.h>
@@ -9,12 +8,14 @@
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
 #include <esp_vfs_fat.h>
+#include <fcntl.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <sd_protocol_defs.h>
 #include <sdmmc_cmd.h>
 #include <string.h>
-#include <vfs_api.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "serial_log.h"
 #include "platform_time.h"
@@ -36,14 +37,17 @@ static uint8_t *s_bounce = nullptr;
 static SemaphoreHandle_t s_bounce_lock = nullptr;
 static const char *s_mode = "not mounted";
 
-static FSImplPtr fs_impl(void) {
-    static FSImplPtr impl = std::make_shared<VFSImpl>();
-    return impl;
+std::string sd_path(const char *path) {
+    return std::string(k_mount) + (path[0] == '/' ? "" : "/") + path;
 }
 
-fs::FS &sd_fs(void) {
-    static fs::FS fs(fs_impl());
-    return fs;
+int sd_open_read(const char *path) {
+    return open(sd_path(path).c_str(), O_RDONLY);
+}
+
+size_t sd_file_size(int fd) {
+    struct stat st;
+    return (fd >= 0 && fstat(fd, &st) == 0) ? (size_t)st.st_size : 0;
 }
 
 /*
@@ -252,7 +256,6 @@ bool sd_card_mount(void) {
     } else {
         return false;
     }
-    fs_impl()->mountpoint(k_mount); /* sd_fs() paths now resolve under /sd */
     serial_log("[sd] mount OK at \"%s\" (%s), %s %s, %llu MiB, %d kHz", k_mount, s_mode, s_card->cid.name,
                sd_card_type(), (unsigned long long)(sd_card_size_bytes() / (1024 * 1024)),
                s_card->max_freq_khz ? s_card->max_freq_khz : freq_khz);
@@ -287,18 +290,21 @@ bool sd_card_usage(uint64_t *total, uint64_t *used) {
     return true;
 }
 
-size_t sd_read(fs::File &f, void *dst, size_t len) {
+size_t sd_read(int fd, void *dst, size_t len) {
     if (esp_ptr_dma_capable(dst) || !s_bounce) {
-        return f.read((uint8_t *)dst, len); /* internal DMA-capable: FATFS reads straight into it */
+        /* internal DMA-capable: FATFS reads straight into it */
+        const ssize_t n = read(fd, dst, len);
+        return n > 0 ? (size_t)n : 0;
     }
     size_t got = 0;
     xSemaphoreTake(s_bounce_lock, portMAX_DELAY);
     while (got < len) {
         const size_t want = (len - got) < k_bounce_size ? (len - got) : k_bounce_size;
-        const size_t n = f.read(s_bounce, want);
-        if (n == 0) {
+        const ssize_t r = read(fd, s_bounce, want);
+        if (r <= 0) {
             break;
         }
+        const size_t n = (size_t)r;
         memcpy((uint8_t *)dst + got, s_bounce, n);
         got += n;
         if (n < want) {

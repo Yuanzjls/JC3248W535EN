@@ -1,11 +1,16 @@
 #include "files_ui.h"
 
-#include <Arduino.h>
 #include "sd_card.h"
+#include <dirent.h>
+#include <esp_heap_caps.h>
 #include <lvgl.h>
 #include <algorithm>
+#include <string>
+#include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 #include <vector>
 
 #include "media_ui.h"
@@ -26,7 +31,7 @@ static const size_t k_max_text = 16 * 1024;   /* viewer limit */
 static const size_t k_text_sniff = 512;       /* bytes checked to decide "is this text?" */
 
 struct Entry {
-    String name;
+    std::string name;
     bool dir;
     uint32_t size;
     time_t mtime;
@@ -43,18 +48,18 @@ static lv_obj_t *s_view_scr = nullptr;
 static lv_obj_t *s_view_bar = nullptr;
 static lv_obj_t *s_view_body = nullptr;
 
-static String s_cwd = "/";
+static std::string s_cwd = "/";
 static std::vector<Entry> s_entries;
 
 /* ---------- helpers ---------- */
 
-static String join_path(const String &dir, const String &name) {
-    return dir.endsWith("/") ? dir + name : dir + "/" + name;
+static std::string join_path(const std::string &dir, const std::string &name) {
+    return (!dir.empty() && dir.back() == '/') ? dir + name : dir + "/" + name;
 }
 
-static String parent_path(const String &path) {
-    const int slash = path.lastIndexOf('/');
-    return slash <= 0 ? String("/") : path.substring(0, slash);
+static std::string parent_path(const std::string &path) {
+    const size_t slash = path.rfind('/');
+    return (slash == std::string::npos || slash == 0) ? std::string("/") : path.substr(0, slash);
 }
 
 static void fmt_size(char *buf, size_t n, uint64_t bytes) {
@@ -69,12 +74,12 @@ static void fmt_size(char *buf, size_t n, uint64_t bytes) {
     }
 }
 
-static bool ends_with_ci(const String &s, const char *suffix) {
+static bool ends_with_ci(const std::string &s, const char *suffix) {
     const size_t n = strlen(suffix);
-    return s.length() >= n && strcasecmp(s.c_str() + s.length() - n, suffix) == 0;
+    return s.size() >= n && strcasecmp(s.c_str() + s.size() - n, suffix) == 0;
 }
 
-static bool is_text_ext(const String &name) {
+static bool is_text_ext(const std::string &name) {
     static const char *const k_ext[] = {".txt", ".ini", ".json", ".csv", ".log", ".md", ".cfg", ".conf", ".xml", ".htm",
                                         ".html", ".h", ".c", ".cpp", ".py", ".js", ".css", ".yaml", ".yml"};
     for (const char *e : k_ext) {
@@ -99,7 +104,7 @@ static const char *icon_for(const Entry &e, lv_color_t *color) {
             return LV_SYMBOL_IMAGE;
         }
     }
-    if (media_is_video(e.name)) {
+    if (media_is_video(e.name.c_str())) {
         *color = lv_palette_main(LV_PALETTE_RED);
         return LV_SYMBOL_VIDEO;
     }
@@ -162,9 +167,9 @@ static void open_file(const Entry &e) {
     status_bar_set_title(s_view_bar, e.name.c_str());
     lv_obj_scroll_to_y(lv_obj_get_parent(s_view_body), 0, LV_ANIM_OFF);
 
-    const String path = join_path(s_cwd, e.name);
-    File f = sd_fs().open(path, FILE_READ);
-    if (!f) {
+    const std::string path = join_path(s_cwd, e.name);
+    const int fd = sd_open_read(path.c_str());
+    if (fd < 0) {
         lv_obj_set_style_text_font(s_view_body, &lv_font_montserrat_16, 0);
         lv_label_set_text(s_view_body, "Could not open this file.");
         lv_scr_load(s_view_scr);
@@ -176,10 +181,10 @@ static void open_file(const Entry &e) {
     char *buf = (char *)heap_caps_malloc(want + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     size_t got = 0;
     if (buf) {
-        got = sd_read(f, buf, want);
+        got = sd_read(fd, buf, want);
         buf[got] = '\0';
     }
-    f.close();
+    close(fd);
 
     bool text = buf != nullptr;
     const size_t sniff = got < k_text_sniff ? got : k_text_sniff;
@@ -198,7 +203,7 @@ static void open_file(const Entry &e) {
         if (got == 0) {
             lv_label_set_text(s_view_body, "(empty file)");
         } else if (e.size > k_max_text) {
-            String s = String(buf) + "\n\n... (showing first 16 KB of " + size + ")";
+            const std::string s = std::string(buf) + "\n\n... (showing first 16 KB of " + size + ")";
             lv_label_set_text(s_view_body, s.c_str());
         } else {
             lv_label_set_text(s_view_body, buf);
@@ -222,7 +227,7 @@ static void open_file(const Entry &e) {
 
 /* ---------- list ---------- */
 
-static void show_dir(const String &path);
+static void show_dir(const std::string &path);
 
 static void row_cb(lv_event_t *e) {
     const size_t idx = (size_t)(uintptr_t)lv_event_get_user_data(e);
@@ -232,14 +237,14 @@ static void row_cb(lv_event_t *e) {
     const Entry entry = s_entries[idx]; /* copy: show_dir() rebuilds s_entries */
     if (entry.dir) {
         show_dir(join_path(s_cwd, entry.name));
-    } else if (media_is_video(entry.name)) {
-        media_ui_open_video(join_path(s_cwd, entry.name));
-    } else if (media_is_image(entry.name)) {
+    } else if (media_is_video(entry.name.c_str())) {
+        media_ui_open_video(join_path(s_cwd, entry.name).c_str());
+    } else if (media_is_image(entry.name.c_str())) {
         /* Pass the folder's images so the viewer can swipe through them. */
-        std::vector<String> images;
+        std::vector<std::string> images;
         size_t at = 0;
         for (const Entry &x : s_entries) {
-            if (!x.dir && media_is_image(x.name)) {
+            if (!x.dir && media_is_image(x.name.c_str())) {
                 if (x.name == entry.name) {
                     at = images.size();
                 }
@@ -317,27 +322,28 @@ static void update_footer(void) {
                           (unsigned)s_entries.size());
 }
 
-static void show_dir(const String &path) {
+static void show_dir(const std::string &path) {
     const uint32_t t0 = now_ms();
     s_entries.clear();
     size_t skipped = 0;
 
-    File dir = sd_fs().open(path);
-    if (dir && dir.isDirectory()) {
-        File f = dir.openNextFile();
-        while (f) {
-            if (f.name()[0] == '.') {
+    /* readdir + stat per entry (cheaper than the Arduino listing, which opened every file). */
+    const std::string full = sd_path(path.c_str());
+    DIR *dir = opendir(full.c_str());
+    if (dir) {
+        struct dirent *de;
+        while ((de = readdir(dir)) != nullptr) {
+            if (de->d_name[0] == '.') {
                 /* hidden: our /.cache (video indexes), macOS "._" files, etc. */
             } else if (s_entries.size() < k_max_entries) {
-                const time_t mtime = f.getLastWrite();
-                s_entries.push_back({String(f.name()), f.isDirectory(), (uint32_t)f.size(), mtime});
+                struct stat st = {};
+                (void)stat(join_path(full, de->d_name).c_str(), &st);
+                s_entries.push_back({de->d_name, S_ISDIR(st.st_mode), (uint32_t)st.st_size, st.st_mtime});
             } else {
                 skipped++;
             }
-            f.close();
-            f = dir.openNextFile();
         }
-        dir.close();
+        closedir(dir);
         s_cwd = path;
     } else {
         serial_log("[files] cannot open %s", path.c_str());

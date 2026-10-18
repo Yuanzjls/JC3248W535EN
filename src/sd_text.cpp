@@ -3,15 +3,11 @@
 #include <stdio.h>
 #include <strings.h>
 
-static const char *k_mount = "/sd"; /* sd_card.cpp mounts the card here */
-
-static std::string full_path(const char *path) {
-    return std::string(k_mount) + (path[0] == '/' ? "" : "/") + path;
-}
+#include "sd_card.h"
 
 bool sd_read_text(const char *path, std::string *out) {
     out->clear();
-    FILE *f = fopen(full_path(path).c_str(), "rb");
+    FILE *f = fopen(sd_path(path).c_str(), "rb");
     if (!f) {
         return false;
     }
@@ -26,7 +22,7 @@ bool sd_read_text(const char *path, std::string *out) {
 }
 
 bool sd_write_text(const char *path, const std::string &text) {
-    FILE *f = fopen(full_path(path).c_str(), "wb");
+    FILE *f = fopen(sd_path(path).c_str(), "wb");
     if (!f) {
         return false;
     }

@@ -1,64 +1,62 @@
 #include "ui_font.h"
 
-#include <Arduino.h>
-#include "sd_card.h"
+#include <dirent.h>
+#include <esp_heap_caps.h>
 #include <lvgl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "sd_card.h"
 #include "serial_log.h"
 #include "platform_time.h"
 
-/** Must match include/lv_conf.h LV_FS_POSIX_PATH and Arduino SD mount point */
+/** Must match include/lv_conf.h LV_FS_POSIX_PATH and the SD mount point (sd_card.cpp) */
 static const char *k_sd_mount = "/sd";
 
 /*
- * Arduino SD paths are relative to the mount: VFSImpl does mountpoint+fpath, so use
- * "/fonts/..." not "/sd/fonts/..." (the latter becomes /sd/sd/fonts/...).
- * LVGL uses LV_FS_POSIX_PATH + path after "S:" — keep S:/... as-is.
+ * Card paths ("/fonts/...") for our own reads (sd_open_read adds the /sd mount point); LVGL
+ * paths ("S:/fonts/...") for lv_fs, which maps "S:" to LV_FS_POSIX_PATH.
  */
-static const char *const k_try_arduino[] = {"/fonts/UI_FONT_16.bin", "/UI_FONT_16.bin"};
+static const char *const k_try_card[] = {"/fonts/UI_FONT_16.bin", "/UI_FONT_16.bin"};
 static const char *const k_try_lvgl[] = {"S:/fonts/UI_FONT_16.bin", "S:/UI_FONT_16.bin"};
 
-static const size_t k_try_n = sizeof(k_try_arduino) / sizeof(k_try_arduino[0]);
+static const size_t k_try_n = sizeof(k_try_card) / sizeof(k_try_card[0]);
 
 static lv_font_t *s_loaded_font = nullptr;
 
 /** Resolved pair; nullptr until pick_font_file() succeeds */
-static const char *s_path_arduino = nullptr;
+static const char *s_path_card = nullptr;
 static const char *s_path_lvgl = nullptr;
 
 static void sd_list_root(void) {
-    File root = sd_fs().open("/");
+    DIR *root = opendir(k_sd_mount);
     if (!root) {
         serial_log("[ui_font] diag: cannot open SD root (mount %s) — SD card not mounted?", k_sd_mount);
         return;
     }
-    if (!root.isDirectory()) {
-        serial_log("[ui_font] diag: SD root is not a directory");
-        root.close();
-        return;
-    }
     serial_log("[ui_font] diag: listing card root %s/ (max 24 entries)", k_sd_mount);
-    File f = root.openNextFile();
     unsigned n = 0;
-    while (f && n < 24) {
-        const char *nm = f.name();
-        serial_log("[ui_font]   %s%s %lu", nm, f.isDirectory() ? "/" : "", (unsigned long)f.size());
-        f = root.openNextFile();
+    struct dirent *de;
+    while (n < 24 && (de = readdir(root)) != nullptr) {
+        struct stat st = {};
+        const std::string full = std::string(k_sd_mount) + "/" + de->d_name;
+        (void)stat(full.c_str(), &st);
+        serial_log("[ui_font]   %s%s %lu", de->d_name, S_ISDIR(st.st_mode) ? "/" : "", (unsigned long)st.st_size);
         n++;
     }
-    root.close();
+    closedir(root);
 }
 
 /** Pick first path where the file exists; log help if none */
 static bool pick_font_file(void) {
-    s_path_arduino = nullptr;
+    s_path_card = nullptr;
     s_path_lvgl = nullptr;
     for (size_t i = 0; i < k_try_n; i++) {
-        File file = sd_fs().open(k_try_arduino[i], FILE_READ);
-        if (file) {
-            file.close();
-            s_path_arduino = k_try_arduino[i];
+        struct stat st;
+        if (stat(sd_path(k_try_card[i]).c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            s_path_card = k_try_card[i];
             s_path_lvgl = k_try_lvgl[i];
-            serial_log("[ui_font] font file: %s", s_path_arduino);
+            serial_log("[ui_font] font file: %s", s_path_card);
             return true;
         }
     }
@@ -71,15 +69,16 @@ static void font_load_diagnose(void) {
     if (!pick_font_file()) {
         return;
     }
-    File f = sd_fs().open(s_path_arduino, FILE_READ);
-    if (!f) {
-        serial_log("[ui_font] diag: reopen failed %s", s_path_arduino);
+    const int fd = sd_open_read(s_path_card);
+    if (fd < 0) {
+        serial_log("[ui_font] diag: reopen failed %s", s_path_card);
         return;
     }
-    const size_t sz = f.size();
+    const size_t sz = sd_file_size(fd);
     uint8_t hdr[16];
-    const size_t n = f.read(hdr, sizeof(hdr));
-    f.close();
+    const ssize_t r = read(fd, hdr, sizeof(hdr));
+    const size_t n = r > 0 ? (size_t)r : 0;
+    close(fd);
     serial_log("[ui_font] diag: file bytes=%lu read=%u", (unsigned long)sz, (unsigned)n);
     if (n >= 8) {
         serial_log("[ui_font] diag: hdr[4..7]=%02x %02x %02x %02x (expect head=68 65 61 64)", hdr[4], hdr[5],
@@ -176,29 +175,29 @@ static void mem_drv_register(void) {
 }
 
 /** Read the whole font file into PSRAM and parse it from there. Returns nullptr on any failure. */
-static lv_font_t *load_font_via_psram(const char *arduino_path) {
+static lv_font_t *load_font_via_psram(const char *card_path) {
     const uint32_t t0 = now_ms();
-    File f = sd_fs().open(arduino_path, FILE_READ);
-    if (!f) {
+    const int fd = sd_open_read(card_path);
+    if (fd < 0) {
         return nullptr;
     }
-    const size_t len = f.size();
+    const size_t len = sd_file_size(fd);
     uint8_t *buf = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
         serial_log("[ui_font] PSRAM alloc of %lu bytes failed", (unsigned long)len);
-        f.close();
+        close(fd);
         return nullptr;
     }
     size_t got = 0;
     while (got < len) {
         const size_t chunk = (len - got) < 32768 ? (len - got) : 32768;
-        const size_t n = sd_read(f, buf + got, chunk); /* PSRAM: via DMA bounce buffer */
+        const size_t n = sd_read(fd, buf + got, chunk); /* PSRAM: via DMA bounce buffer */
         if (n == 0) {
             break;
         }
         got += n;
     }
-    f.close();
+    close(fd);
     const uint32_t t_read = now_ms() - t0;
     if (got != len) {
         serial_log("[ui_font] short read %lu/%lu bytes", (unsigned long)got, (unsigned long)len);
@@ -236,7 +235,7 @@ bool ui_font_load_from_sd(void) {
         return false;
     }
 
-    s_loaded_font = load_font_via_psram(s_path_arduino);
+    s_loaded_font = load_font_via_psram(s_path_card);
     if (!s_loaded_font) {
         serial_log("[ui_font] PSRAM path failed — falling back to slow direct SD load");
         s_loaded_font = lv_font_load(s_path_lvgl);

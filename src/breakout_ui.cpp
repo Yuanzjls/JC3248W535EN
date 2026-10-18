@@ -1,10 +1,13 @@
 #include "breakout_ui.h"
 
-#include <Arduino.h>
-#include "sd_card.h"
+#include <esp_random.h>
 #include <lvgl.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
 
+#include "sd_text.h"
 #include "serial_log.h"
 #include "status_bar.h"
 #include "ui_theme.h"
@@ -106,25 +109,21 @@ static void show_ready_msg(const char *headline) {
 /* ---------- persistence ---------- */
 
 static void load_best(void) {
-    File f = sd_fs().open(k_best_path, FILE_READ);
-    if (!f) {
+    std::string text;
+    if (!sd_read_text(k_best_path, &text)) {
         return;
     }
-    String line = f.readStringUntil('\n');
-    f.close();
-    if (line.startsWith("best=")) {
-        s_best = line.substring(5).toInt();
+    if (text.compare(0, 5, "best=") == 0) {
+        s_best = atoi(text.c_str() + 5);
     }
 }
 
 static void save_best(void) {
-    File f = sd_fs().open(k_best_path, FILE_WRITE);
-    if (!f) {
+    char text[24];
+    snprintf(text, sizeof(text), "best=%d\n", s_best);
+    if (!sd_write_text(k_best_path, text)) {
         serial_log("[breakout] cannot write %s", k_best_path);
-        return;
     }
-    f.printf("best=%d\n", s_best);
-    f.close();
 }
 
 /* ---------- display helpers ---------- */

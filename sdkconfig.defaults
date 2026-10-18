@@ -569,7 +569,7 @@ CONFIG_ARDUHAL_PARTITION_SCHEME_DEFAULT=y
 CONFIG_ARDUHAL_PARTITION_SCHEME="default"
 # CONFIG_AUTOCONNECT_WIFI is not set
 CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
-# Arduino libraries used here: FS only (fs::FS over VFS).
+# No Arduino libraries used: files are POSIX on /sd (sd_card.h, sd_text.h).
 # Wi-Fi runs on esp_wifi (wifi_net.cpp), HTTP on esp_http_client, NTP on esp_sntp.
 # BLE is esp-nimble-cpp (ESP-IDF component, not Arduino's BLE). Everything else is left out.
 # CONFIG_ARDUINO_SELECTIVE_SPI is not set
@@ -580,7 +580,7 @@ CONFIG_ARDUINO_SELECTIVE_COMPILATION=y
 # CONFIG_ARDUINO_SELECTIVE_Ticker is not set
 # CONFIG_ARDUINO_SELECTIVE_Update is not set
 # CONFIG_ARDUINO_SELECTIVE_Zigbee is not set
-CONFIG_ARDUINO_SELECTIVE_FS=y
+# CONFIG_ARDUINO_SELECTIVE_FS is not set
 # CONFIG_ARDUINO_SELECTIVE_SD is not set
 # CONFIG_ARDUINO_SELECTIVE_SD_MMC is not set
 # CONFIG_ARDUINO_SELECTIVE_SPIFFS is not set
