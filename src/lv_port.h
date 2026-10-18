@@ -190,6 +190,9 @@ void lvgl_port_debug(uint32_t *stuck_ms, int *stage, const char **lock_holder);
 /** Human-readable stage name for logs. */
 const char *lvgl_port_stage_name(int stage);
 
+/** Start "[ui] LVGL stalled" reports (call at the end of setup: boot holds the lock for seconds). */
+void lvgl_port_enable_stall_report(void);
+
 #ifdef __cplusplus
 }
 #endif

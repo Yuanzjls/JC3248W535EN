@@ -149,6 +149,7 @@ void setup()
 
   serial_log("[boot] setup done in %lu ms total (free heap %lu, free PSRAM %lu)", (unsigned long)(millis() - s_boot_t0),
              (unsigned long)ESP.getFreeHeap(), (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  lvgl_port_enable_stall_report(); /* boot held the display lock for seconds: not a stall */
 }
 
 /** Time one loop step; log it if it blocks the loop for longer than k_slow_step_ms. */

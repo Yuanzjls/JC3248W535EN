@@ -5,9 +5,13 @@
 #include <stdint.h>
 
 /*
- * SD card through ESP-IDF's own driver (sdspi on SPI3 + FATFS at "/sd"), instead of the Arduino SD
- * library. Data blocks move by DMA while the calling task sleeps; the Arduino library busy-waited
- * on every byte (core 0 at ~90 % during video, a watchdog reset, a starved UI).
+ * SD card through ESP-IDF's own drivers + FATFS at "/sd", instead of the Arduino SD library:
+ *  - preferred: native SD bus, 1-bit (SDMMC peripheral) - hardware handles waits, CRC and DMA,
+ *    one interrupt per transfer, no polling;
+ *  - fallback: SPI mode (sdspi on SPI3) - DMA data, but the wait for each block is polled. Used
+ *    when the card is still in SPI mode (only a power cycle switches it back).
+ * The Arduino library busy-waited on every byte (core 0 at ~90 % during video, a watchdog reset,
+ * a starved UI).
  *
  * File access keeps the Arduino API: sd_fs().open(), File.read(), openNextFile()... (an fs::FS
  * over the ESP-IDF mount), so callers only swap SD for sd_fs().

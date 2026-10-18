@@ -90,6 +90,9 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
 static volatile uint8_t s_lvgl_stage = LVGL_STAGE_SLEEP;
 static volatile int64_t s_lvgl_stage_since_us = 0;
 static TaskHandle_t s_lvgl_task = NULL;
+/* Stall reports only after boot: setup() holds the display lock for seconds (font load). */
+static volatile bool s_stall_report = false;
+void lvgl_port_enable_stall_report(void) { s_stall_report = true; }
 /* Only the LVGL task's own progress counts: flush_area() also runs on the media task (direct
  * video frames), and those calls must not look like the UI being stuck. */
 #define LVGL_SET_STAGE(st) do { if (xTaskGetCurrentTaskHandle() == s_lvgl_task) { s_lvgl_stage = (st); s_lvgl_stage_since_us = esp_timer_get_time(); } } while (0)
@@ -395,7 +398,7 @@ static void lvgl_port_task(void *arg)
         if (lvgl_port_lock(0)) {
             const int64_t got_us = esp_timer_get_time();
             const int64_t gap_ms = (got_us - last_run_us) / 1000;
-            if (last_run_us != 0 && gap_ms > 300 && got_us - last_report_us > 1000000) {
+            if (s_stall_report && last_run_us != 0 && gap_ms > 300 && got_us - last_report_us > 1000000) {
                 last_report_us = got_us;
                 serial_log("[ui] LVGL stalled %ld ms (waited %ld ms for the display lock)", (long)gap_ms,
                            (long)((got_us - want_us) / 1000));

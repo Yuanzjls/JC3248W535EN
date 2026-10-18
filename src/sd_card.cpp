@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <driver/gpio.h>
+#include <driver/sdmmc_host.h>
 #include <driver/sdspi_host.h>
 #include <driver/spi_common.h>
 #include <driver/spi_master.h>
@@ -32,6 +33,7 @@ static bool s_bus_ok = false;
 static sdmmc_card_t *s_card = nullptr;
 static uint8_t *s_bounce = nullptr;
 static SemaphoreHandle_t s_bounce_lock = nullptr;
+static const char *s_mode = "not mounted";
 
 static FSImplPtr fs_impl(void) {
     static FSImplPtr impl = std::make_shared<VFSImpl>();
@@ -119,10 +121,57 @@ extern "C" esp_err_t __wrap_sdmmc_init_sd_ssr(sdmmc_card_t *card) {
     return err;
 }
 
-bool sd_card_mount(void) {
-    if (s_card) {
-        return true;
+static esp_vfs_fat_sdmmc_mount_config_t mount_config(void) {
+    esp_vfs_fat_sdmmc_mount_config_t mount = {};
+    mount.format_if_mount_failed = false; /* never wipe the user's card */
+    mount.max_files = 8;                  /* video: stream + index scan + cache, plus settings/files */
+    mount.allocation_unit_size = 16 * 1024;
+    return mount;
+}
+
+/*
+ * Native SD bus, 1-bit (SDMMC peripheral): the hardware waits for the card's data, checks CRCs and
+ * runs DMA, then raises one interrupt per transfer - no polling at all, unlike SPI mode.
+ * The board wires CLK=12, CMD=11, DAT0=13 and DAT3=10; DAT1/DAT2 only go to pull-ups, so 4-bit
+ * isn't possible. DAT3 must be high at CMD0 or the card chooses SPI mode.
+ *
+ * A card that was put in SPI mode stays there until its power is cut, so after running the SPI
+ * firmware (or a reset that didn't power-cycle the card) this fails and we fall back to SPI.
+ */
+static bool try_sdmmc(void) {
+    gpio_reset_pin(k_pin_cs);
+    gpio_set_direction(k_pin_cs, GPIO_MODE_OUTPUT);
+    gpio_set_level(k_pin_cs, 1); /* DAT3 high: SD (not SPI) mode */
+
+    const esp_vfs_fat_sdmmc_mount_config_t mount = mount_config();
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+            delay(200);
+        }
+        sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        host.flags = SDMMC_HOST_FLAG_1BIT | SDMMC_HOST_FLAG_DEINIT_ARG;
+        host.max_freq_khz = SDMMC_FREQ_DEFAULT; /* 20 MHz */
+        sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot.width = 1;
+        slot.clk = k_pin_sck;
+        slot.cmd = k_pin_mosi;
+        slot.d0 = k_pin_miso;
+        slot.d1 = slot.d2 = slot.d3 = GPIO_NUM_NC;
+        slot.d4 = slot.d5 = slot.d6 = slot.d7 = GPIO_NUM_NC;
+        slot.flags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP; /* in addition to the board's 10 k pull-ups */
+        err = esp_vfs_fat_sdmmc_mount(k_mount, &host, &slot, &mount, &s_card);
+        if (err == ESP_OK) {
+            return true;
+        }
+        s_card = nullptr;
     }
+    serial_log("[sd] SD bus (1-bit) mode not available (%s) - falling back to SPI mode", esp_err_to_name(err));
+    return false;
+}
+
+/* SPI mode (sdspi on SPI3), with recovery for a card left mid-transfer by a reset. */
+static bool try_sdspi(int *freq_khz_out) {
     if (!s_bus_ok) {
         /* SD expects pull-ups on its lines (especially the card's data out); cheap insurance. */
         gpio_set_pull_mode(k_pin_miso, GPIO_PULLUP_ONLY);
@@ -142,15 +191,7 @@ bool sd_card_mount(void) {
         }
         s_bus_ok = true;
     }
-    if (!s_bounce) {
-        s_bounce = (uint8_t *)heap_caps_malloc(k_bounce_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        s_bounce_lock = xSemaphoreCreateMutex();
-    }
-
-    esp_vfs_fat_sdmmc_mount_config_t mount = {};
-    mount.format_if_mount_failed = false; /* never wipe the user's card */
-    mount.max_files = 8;                  /* video: stream + index scan + cache, plus settings/files */
-    mount.allocation_unit_size = 16 * 1024;
+    const esp_vfs_fat_sdmmc_mount_config_t mount = mount_config();
 
     /*
      * 20 MHz first. Retries (after a reset that interrupted the card) run at 4 MHz with growing
@@ -189,9 +230,31 @@ bool sd_card_mount(void) {
     if (attempt > 0) {
         serial_log("[sd] recovered on attempt %d (at %d kHz)", attempt + 1, k_freq_khz[attempt]);
     }
+    *freq_khz_out = k_freq_khz[attempt];
+    return true;
+}
+
+bool sd_card_mount(void) {
+    if (s_card) {
+        return true;
+    }
+    if (!s_bounce) {
+        s_bounce = (uint8_t *)heap_caps_malloc(k_bounce_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        s_bounce_lock = xSemaphoreCreateMutex();
+    }
+
+    int freq_khz = SDMMC_FREQ_DEFAULT;
+    if (try_sdmmc()) {
+        s_mode = "SD bus 1-bit, hardware DMA";
+    } else if (try_sdspi(&freq_khz)) {
+        s_mode = "SPI mode, DMA data";
+    } else {
+        return false;
+    }
     fs_impl()->mountpoint(k_mount); /* sd_fs() paths now resolve under /sd */
-    serial_log("[sd] mount OK at \"%s\" (ESP-IDF sdspi, DMA), %s %s, %llu MiB, %d kHz", k_mount, s_card->cid.name,
-               sd_card_type(), (unsigned long long)(sd_card_size_bytes() / (1024 * 1024)), k_freq_khz[attempt]);
+    serial_log("[sd] mount OK at \"%s\" (%s), %s %s, %llu MiB, %d kHz", k_mount, s_mode, s_card->cid.name,
+               sd_card_type(), (unsigned long long)(sd_card_size_bytes() / (1024 * 1024)),
+               s_card->max_freq_khz ? s_card->max_freq_khz : freq_khz);
     return true;
 }
 
