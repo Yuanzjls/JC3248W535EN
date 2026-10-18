@@ -1,6 +1,6 @@
 #include "wifi_store.h"
 
-#include <SD.h>
+#include "sd_card.h"
 #include <algorithm>
 #include <string.h>
 #include <vector>
@@ -77,7 +77,7 @@ static bool read_line_trim(File &f, String &out) {
 
 static void load_from_sd(void) {
     s_known.clear();
-    File f = SD.open(k_file, FILE_READ);
+    File f = sd_fs().open(k_file, FILE_READ);
     if (!f) {
         serial_log("[wifi_store] %s not found on SD", k_file);
         return;
@@ -111,7 +111,7 @@ static void load_from_sd(void) {
 }
 
 static bool write_to_sd(void) {
-    File f = SD.open(k_file, FILE_WRITE);
+    File f = sd_fs().open(k_file, FILE_WRITE);
     if (!f) {
         serial_log("[wifi_store] cannot write %s", k_file);
         return false;

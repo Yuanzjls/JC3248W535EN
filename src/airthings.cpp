@@ -1,7 +1,7 @@
 #include "airthings.h"
 
 #include <NimBLEDevice.h>
-#include <SD.h>
+#include "sd_card.h"
 #include <time.h>
 
 #include "air_ui.h"
@@ -81,7 +81,7 @@ static void set_status(const char *fmt, ...) {
 /* ---------- config on SD ---------- */
 
 static void load_config(void) {
-    File f = SD.open(k_ini, FILE_READ);
+    File f = sd_fs().open(k_ini, FILE_READ);
     if (!f) {
         serial_log("[air] %s not found: no sensor chosen yet", k_ini);
         return;
@@ -117,7 +117,7 @@ static void load_config(void) {
 }
 
 static void save_config(void) {
-    File f = SD.open(k_ini, FILE_WRITE);
+    File f = sd_fs().open(k_ini, FILE_WRITE);
     if (!f) {
         serial_log("[air] cannot write %s", k_ini);
         return;

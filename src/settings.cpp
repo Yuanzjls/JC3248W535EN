@@ -1,7 +1,7 @@
 #include "app_settings.h"
 
 #include <Arduino.h>
-#include <SD.h>
+#include "sd_card.h"
 #include <stdio.h>
 
 #include "display.h"
@@ -26,7 +26,7 @@ static const char *units_name(TempUnits u) {
 }
 
 static void save(void) {
-    File f = SD.open(k_path, FILE_WRITE);
+    File f = sd_fs().open(k_path, FILE_WRITE);
     if (!f) {
         serial_log("[settings] cannot write %s", k_path);
         return;
@@ -40,7 +40,7 @@ static void save(void) {
 }
 
 void settings_load(void) {
-    File f = SD.open(k_path, FILE_READ);
+    File f = sd_fs().open(k_path, FILE_READ);
     if (!f) {
         serial_log("[settings] %s not found, using defaults", k_path);
         return;

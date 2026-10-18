@@ -1,6 +1,6 @@
 #include "timezone_ini.h"
 
-#include <SD.h>
+#include "sd_card.h"
 
 #include "serial_log.h"
 
@@ -10,7 +10,7 @@ bool timezone_ini_load(String *out_posix) {
     if (!out_posix) {
         return false;
     }
-    File f = SD.open(k_path, FILE_READ);
+    File f = sd_fs().open(k_path, FILE_READ);
     if (!f) {
         serial_log("[timezone_ini] %s not found on SD", k_path);
         return false;
@@ -58,7 +58,7 @@ bool timezone_ini_save(const char *posix) {
     if (!posix || !posix[0]) {
         return false;
     }
-    File f = SD.open(k_path, FILE_WRITE);
+    File f = sd_fs().open(k_path, FILE_WRITE);
     if (!f) {
         serial_log("[timezone_ini] cannot write %s", k_path);
         return false;

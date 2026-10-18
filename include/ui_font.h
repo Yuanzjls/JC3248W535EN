@@ -6,10 +6,7 @@
 extern "C" {
 #endif
 
-/**
- * Mount SD card (SPI) before LVGL init. Uses /sd as VFS mount (must match lv_conf LV_FS_POSIX_PATH).
- */
-bool ui_font_mount_sd(void);
+/* The SD card is mounted by sd_card_mount() (sd_card.h) before this is used. */
 
 /**
  * Load fonts/UI_FONT_16.bin via LVGL FS (call after lv_init, under bsp_display_lock).

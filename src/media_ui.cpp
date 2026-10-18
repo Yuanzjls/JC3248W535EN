@@ -8,7 +8,7 @@
  * parameter named `local`, so keep the macro from leaking into anything included later. */
 #undef local
 
-#include <SD.h>
+#include "sd_card.h"
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -390,7 +390,7 @@ static void show_still(const char *path) {
     }
     ui_message("Loading...");
     char info[96] = "";
-    File f = SD.open(path, FILE_READ);
+    File f = sd_fs().open(path, FILE_READ);
     if (!f) {
         ui_message("Cannot open file");
         return;
@@ -408,7 +408,7 @@ static void show_still(const char *path) {
         return;
     }
     const uint32_t t0 = millis();
-    const size_t got = f.read(data, len);
+    const size_t got = sd_read(f, data, len);
     f.close();
     const uint32_t t_read = millis() - t0;
 
@@ -542,14 +542,14 @@ static String index_cache_path(const char *video) {
 }
 
 static bool index_load(const char *video, uint32_t file_size) {
-    File f = SD.open(index_cache_path(video), FILE_READ);
+    File f = sd_fs().open(index_cache_path(video), FILE_READ);
     if (!f) {
         return false;
     }
     uint32_t hdr[3] = {0, 0, 0};
     bool ok = f.read((uint8_t *)hdr, sizeof(hdr)) == sizeof(hdr) && hdr[0] == k_index_magic &&
               hdr[1] == file_size && hdr[2] > 0 && hdr[2] <= k_index_max &&
-              f.read((uint8_t *)s_index, hdr[2] * 4) == hdr[2] * 4;
+              sd_read(f, s_index, hdr[2] * 4) == hdr[2] * 4;
     f.close();
     if (ok) {
         s_index_count = hdr[2];
@@ -560,9 +560,9 @@ static bool index_load(const char *video, uint32_t file_size) {
 }
 
 static void index_save(const char *video, uint32_t file_size) {
-    SD.mkdir("/.cache");
-    SD.mkdir(k_index_dir);
-    File f = SD.open(index_cache_path(video), FILE_WRITE);
+    sd_fs().mkdir("/.cache");
+    sd_fs().mkdir(k_index_dir);
+    File f = sd_fs().open(index_cache_path(video), FILE_WRITE);
     if (!f) {
         serial_log("[media] cannot write index cache");
         return;
@@ -581,7 +581,7 @@ static void index_begin(const char *video, uint32_t file_size) {
     if (!s_index || !s_scan_buf || index_load(video, file_size)) {
         return;
     }
-    s_scan_f = SD.open(video, FILE_READ); /* own handle: the playback read position is untouched */
+    s_scan_f = sd_fs().open(video, FILE_READ); /* own handle: the playback read position is untouched */
     s_scan_off = 0;
     s_scan_prev_ff = false;
     s_scan_active = (bool)s_scan_f;
@@ -600,7 +600,7 @@ static bool index_scan_step(const char *video, uint32_t file_size) {
     if (!s_scan_active) {
         return false;
     }
-    const size_t n = s_scan_f.read(s_scan_buf, k_read_chunk);
+    const size_t n = sd_read(s_scan_f, s_scan_buf, k_read_chunk);
     for (size_t i = 0; i < n; i++) {
         if (s_scan_prev_ff && s_scan_buf[i] == 0xD8) {
             if (s_index_count >= k_index_max) {
@@ -635,7 +635,7 @@ static void reader_task(void *arg) {
     LV_UNUSED(arg);
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        File f = SD.open(s_reader_path, FILE_READ);
+        File f = sd_fs().open(s_reader_path, FILE_READ);
         s_file_size = f ? (uint32_t)f.size() : 0;
         if (f) {
             index_begin(s_reader_path, s_file_size);
@@ -670,7 +670,7 @@ static void reader_task(void *arg) {
                     }
                     const size_t want = (k_stream_buf - end) < k_read_chunk ? (k_stream_buf - end) : k_read_chunk;
                     const uint32_t t0 = millis();
-                    const size_t n = f.read(s_stream + end, want);
+                    const size_t n = sd_read(f, s_stream + end, want);
                     s_read_ms += millis() - t0;
                     s_read_bytes += n;
                     /* Same watchdog rule as indexing: if the card is the bottleneck this loop never

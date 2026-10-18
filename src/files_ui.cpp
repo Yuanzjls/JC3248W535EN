@@ -1,7 +1,7 @@
 #include "files_ui.h"
 
 #include <Arduino.h>
-#include <SD.h>
+#include "sd_card.h"
 #include <lvgl.h>
 #include <algorithm>
 #include <strings.h>
@@ -162,7 +162,7 @@ static void open_file(const Entry &e) {
     lv_obj_scroll_to_y(lv_obj_get_parent(s_view_body), 0, LV_ANIM_OFF);
 
     const String path = join_path(s_cwd, e.name);
-    File f = SD.open(path, FILE_READ);
+    File f = sd_fs().open(path, FILE_READ);
     if (!f) {
         lv_obj_set_style_text_font(s_view_body, &lv_font_montserrat_16, 0);
         lv_label_set_text(s_view_body, "Could not open this file.");
@@ -175,7 +175,7 @@ static void open_file(const Entry &e) {
     char *buf = (char *)heap_caps_malloc(want + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     size_t got = 0;
     if (buf) {
-        got = f.read((uint8_t *)buf, want);
+        got = sd_read(f, buf, want);
         buf[got] = '\0';
     }
     f.close();
@@ -304,16 +304,15 @@ static void add_row(size_t idx) {
 }
 
 static void update_footer(void) {
-    const uint8_t type = SD.cardType();
-    if (type == CARD_NONE) {
+    uint64_t total_b = 0, used_b = 0;
+    if (!sd_card_mounted() || !sd_card_usage(&total_b, &used_b)) {
         lv_label_set_text(s_footer, "No SD card");
         return;
     }
     char used[16], total[16];
-    fmt_size(used, sizeof(used), SD.usedBytes());
-    fmt_size(total, sizeof(total), SD.totalBytes());
-    const char *kind = type == CARD_MMC ? "MMC" : type == CARD_SD ? "SDSC" : type == CARD_SDHC ? "SDHC" : "SD";
-    lv_label_set_text_fmt(s_footer, "%s card  -  %s used of %s  -  %u item(s) here", kind, used, total,
+    fmt_size(used, sizeof(used), used_b);
+    fmt_size(total, sizeof(total), total_b);
+    lv_label_set_text_fmt(s_footer, "%s card  -  %s used of %s  -  %u item(s) here", sd_card_type(), used, total,
                           (unsigned)s_entries.size());
 }
 
@@ -322,7 +321,7 @@ static void show_dir(const String &path) {
     s_entries.clear();
     size_t skipped = 0;
 
-    File dir = SD.open(path);
+    File dir = sd_fs().open(path);
     if (dir && dir.isDirectory()) {
         File f = dir.openNextFile();
         while (f) {
@@ -359,7 +358,7 @@ static void show_dir(const String &path) {
         lv_obj_set_style_text_font(empty, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(empty, ui_color_text_muted(), 0);
         lv_obj_set_style_pad_all(empty, 16, 0);
-        lv_label_set_text(empty, SD.cardType() == CARD_NONE ? "No SD card" : "Empty folder");
+        lv_label_set_text(empty, sd_card_mounted() ? "Empty folder" : "No SD card");
     }
     if (skipped) {
         lv_obj_t *more = lv_label_create(s_list);

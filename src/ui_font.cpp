@@ -1,18 +1,9 @@
 #include "ui_font.h"
 
 #include <Arduino.h>
-#include <SD.h>
-#include <SPI.h>
+#include "sd_card.h"
 #include <lvgl.h>
 #include "serial_log.h"
-
-/* Same wiring as board (HSPI SD card) */
-#ifndef SDCARD_CS
-#define SDCARD_CS 10
-#define SDCARD_MISO 13
-#define SDCARD_MOSI 11
-#define SDCARD_SCK 12
-#endif
 
 /** Must match include/lv_conf.h LV_FS_POSIX_PATH and Arduino SD mount point */
 static const char *k_sd_mount = "/sd";
@@ -27,7 +18,6 @@ static const char *const k_try_lvgl[] = {"S:/fonts/UI_FONT_16.bin", "S:/UI_FONT_
 
 static const size_t k_try_n = sizeof(k_try_arduino) / sizeof(k_try_arduino[0]);
 
-static SPIClass s_sd_spi(HSPI);
 static lv_font_t *s_loaded_font = nullptr;
 
 /** Resolved pair; nullptr until pick_font_file() succeeds */
@@ -35,9 +25,9 @@ static const char *s_path_arduino = nullptr;
 static const char *s_path_lvgl = nullptr;
 
 static void sd_list_root(void) {
-    File root = SD.open("/");
+    File root = sd_fs().open("/");
     if (!root) {
-        serial_log("[ui_font] diag: cannot open SD root (mount %s) — SD.begin failed or card missing?", k_sd_mount);
+        serial_log("[ui_font] diag: cannot open SD root (mount %s) — SD card not mounted?", k_sd_mount);
         return;
     }
     if (!root.isDirectory()) {
@@ -62,7 +52,7 @@ static bool pick_font_file(void) {
     s_path_arduino = nullptr;
     s_path_lvgl = nullptr;
     for (size_t i = 0; i < k_try_n; i++) {
-        File file = SD.open(k_try_arduino[i], FILE_READ);
+        File file = sd_fs().open(k_try_arduino[i], FILE_READ);
         if (file) {
             file.close();
             s_path_arduino = k_try_arduino[i];
@@ -80,7 +70,7 @@ static void font_load_diagnose(void) {
     if (!pick_font_file()) {
         return;
     }
-    File f = SD.open(s_path_arduino, FILE_READ);
+    File f = sd_fs().open(s_path_arduino, FILE_READ);
     if (!f) {
         serial_log("[ui_font] diag: reopen failed %s", s_path_arduino);
         return;
@@ -104,76 +94,6 @@ static void font_load_diagnose(void) {
     if (res == LV_FS_RES_OK) {
         lv_fs_close(&lvf);
     }
-}
-
-/*
- * A chip reset (USB reset from uploading or opening the monitor, watchdog, crash, reset button)
- * doesn't reset the SD card - it keeps its power. If the reset hit in the middle of:
- *  - a read: the card is still sending that block and ignores the init command;
- *  - a write: the card is busy programming its flash and holds its data line (MISO) low until done.
- * Either way the mount fails with "physical drive cannot work". So: clock out enough dummy bytes
- * for any block in flight to finish, wait (card selected) until it stops signalling busy, then
- * deselect it and give it the 74+ idle clocks that SD init expects.
- */
-static void sd_unstick(void) {
-    pinMode(SDCARD_CS, OUTPUT);
-    s_sd_spi.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    digitalWrite(SDCARD_CS, LOW);
-    for (int i = 0; i < 1024; i++) { /* > one 512-byte block + CRC + token */
-        s_sd_spi.transfer(0xFF);
-    }
-    /* Busy = card drives 0x00; idle = 0xFF. Wait for 8 idle bytes in a row (up to 500 ms). */
-    const uint32_t t0 = millis();
-    int idle = 0;
-    while (idle < 8 && millis() - t0 < 500) {
-        idle = (s_sd_spi.transfer(0xFF) == 0xFF) ? idle + 1 : 0;
-    }
-    if (idle < 8) {
-        serial_log("[ui_font] SD: card still busy after 500 ms");
-    }
-    digitalWrite(SDCARD_CS, HIGH);
-    for (int i = 0; i < 16; i++) { /* 128 clocks with the card deselected */
-        s_sd_spi.transfer(0xFF);
-    }
-    s_sd_spi.endTransaction();
-}
-
-bool ui_font_mount_sd(void) {
-    serial_log("[ui_font] SD: initializing SPI (HSPI)...");
-    s_sd_spi.begin(SDCARD_SCK, SDCARD_MISO, SDCARD_MOSI, SDCARD_CS);
-    /*
-     * 20 MHz first: 4 MHz made the 2.3 MB font take seconds to read. Retries (after a reset that
-     * interrupted the card) run at 4 MHz with growing pauses, ~2 s in total, before giving up.
-     */
-    static const uint32_t k_freqs[] = {20000000, 4000000, 4000000, 4000000, 4000000};
-    static const uint32_t k_pause_ms[] = {0, 100, 250, 500, 1000};
-    static const int k_attempts = sizeof(k_freqs) / sizeof(k_freqs[0]);
-    bool mounted = false;
-    int attempt = 0;
-    for (; attempt < k_attempts && !mounted; attempt++) {
-        if (attempt > 0) {
-            serial_log("[ui_font] SD: mount failed, recovering card (attempt %d/%d)", attempt + 1, k_attempts);
-            SD.end();
-            sd_unstick();
-            delay(k_pause_ms[attempt]);
-        }
-        mounted = SD.begin(SDCARD_CS, s_sd_spi, k_freqs[attempt], k_sd_mount, 5, false);
-    }
-    if (!mounted) {
-        serial_log("[ui_font] SD: mount FAILED (mount point \"%s\") - card missing or stuck: unplug the board "
-                   "for a few seconds to power-cycle the card",
-                   k_sd_mount);
-        return false;
-    }
-    if (attempt > 1) {
-        serial_log("[ui_font] SD: recovered on attempt %d (at %lu Hz)", attempt, (unsigned long)k_freqs[attempt - 1]);
-    }
-    uint8_t t = SD.cardType();
-    const char *type =
-        (t == CARD_NONE) ? "none" : (t == CARD_MMC) ? "MMC" : (t == CARD_SD) ? "SDSC" : (t == CARD_SDHC) ? "SDHC" : "unknown";
-    const unsigned long mb = (unsigned long)(SD.cardSize() / (1024U * 1024U));
-    serial_log("[ui_font] SD: mount OK at \"%s\", type=%s, size=%lu MiB", k_sd_mount, type, mb);
-    return true;
 }
 
 /*
@@ -257,7 +177,7 @@ static void mem_drv_register(void) {
 /** Read the whole font file into PSRAM and parse it from there. Returns nullptr on any failure. */
 static lv_font_t *load_font_via_psram(const char *arduino_path) {
     const uint32_t t0 = millis();
-    File f = SD.open(arduino_path, FILE_READ);
+    File f = sd_fs().open(arduino_path, FILE_READ);
     if (!f) {
         return nullptr;
     }
@@ -271,7 +191,7 @@ static lv_font_t *load_font_via_psram(const char *arduino_path) {
     size_t got = 0;
     while (got < len) {
         const size_t chunk = (len - got) < 32768 ? (len - got) : 32768;
-        const size_t n = f.read(buf + got, chunk);
+        const size_t n = sd_read(f, buf + got, chunk); /* PSRAM: via DMA bounce buffer */
         if (n == 0) {
             break;
         }

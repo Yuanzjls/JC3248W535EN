@@ -6,6 +6,7 @@
 #include "esp_bsp.h"
 #include "lv_port.h"
 #include "ui_font.h"
+#include "sd_card.h"
 #include "clock_ui.h"
 #include "wifi_store.h"
 #include "wifi_ui.h"
@@ -97,7 +98,7 @@ void setup()
   serial_log_init();
   serial_log("[app] boot: starting (reset reason %d: %s)", (int)esp_reset_reason(), reset_reason_str(esp_reset_reason()));
 
-  BOOT_STEP("SD mount", (void)ui_font_mount_sd());
+  BOOT_STEP("SD mount", (void)sd_card_mount());
   BOOT_STEP("wifi_store_begin (read SD)", wifi_store_begin());
   BOOT_STEP("clock_ui_init (read TZ)", clock_ui_init());
   BOOT_STEP("settings_load (read SD)", settings_load());

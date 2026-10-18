@@ -2,7 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
-#include <SD.h>
+#include "sd_card.h"
 #include <WiFi.h>
 
 #include "esp_bsp.h"
@@ -44,7 +44,7 @@ static void set_status(const char *s) {
 }
 
 static void load_ini(void) {
-    File f = SD.open(k_ini_path, FILE_READ);
+    File f = sd_fs().open(k_ini_path, FILE_READ);
     if (!f) {
         serial_log("[weather] %s not found, using IP geolocation", k_ini_path);
         return;

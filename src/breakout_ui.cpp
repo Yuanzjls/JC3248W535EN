@@ -1,7 +1,7 @@
 #include "breakout_ui.h"
 
 #include <Arduino.h>
-#include <SD.h>
+#include "sd_card.h"
 #include <lvgl.h>
 #include <math.h>
 
@@ -106,7 +106,7 @@ static void show_ready_msg(const char *headline) {
 /* ---------- persistence ---------- */
 
 static void load_best(void) {
-    File f = SD.open(k_best_path, FILE_READ);
+    File f = sd_fs().open(k_best_path, FILE_READ);
     if (!f) {
         return;
     }
@@ -118,7 +118,7 @@ static void load_best(void) {
 }
 
 static void save_best(void) {
-    File f = SD.open(k_best_path, FILE_WRITE);
+    File f = sd_fs().open(k_best_path, FILE_WRITE);
     if (!f) {
         serial_log("[breakout] cannot write %s", k_best_path);
         return;
