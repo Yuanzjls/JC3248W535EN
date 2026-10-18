@@ -1,7 +1,8 @@
 #include "weather.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
+#include <algorithm>
+#include <esp_http_client.h>
 #include "sd_card.h"
 #include "wifi_net.h"
 
@@ -114,31 +115,79 @@ struct PsramJsonAllocator : ArduinoJson::Allocator {
 };
 static PsramJsonAllocator s_json_alloc;
 
-/** GET url and parse the JSON straight from the socket (no body String). Sets status on failure. */
+/**
+ * ArduinoJson reader over an open esp_http_client: the body is parsed as it arrives (chunked
+ * encoding is decoded by the client), through a small buffer instead of one read per byte.
+ */
+struct HttpBodyReader {
+    esp_http_client_handle_t client;
+    char buf[256];
+    int len = 0;
+    int pos = 0;
+
+    bool fill() {
+        len = esp_http_client_read(client, buf, sizeof(buf));
+        pos = 0;
+        return len > 0;
+    }
+    int read() {
+        if (pos >= len && !fill()) {
+            return -1;
+        }
+        return (uint8_t)buf[pos++];
+    }
+    size_t readBytes(char *dst, size_t n) {
+        size_t got = 0;
+        while (got < n) {
+            if (pos >= len && !fill()) {
+                break;
+            }
+            const size_t k = std::min(n - got, (size_t)(len - pos));
+            memcpy(dst + got, buf + pos, k);
+            pos += (int)k;
+            got += k;
+        }
+        return got;
+    }
+};
+
+/** GET url and parse the JSON straight from the socket (no body buffer). Sets status on failure. */
 static bool http_get_json(const String &url, JsonDocument &doc) {
-    HTTPClient http;
-    http.useHTTP10(true); /* plain body, no chunked encoding: needed to parse from the stream */
-    http.setTimeout(10000);
-    http.setConnectTimeout(8000);
-    if (!http.begin(url)) {
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str();
+    cfg.timeout_ms = 10000;
+    cfg.buffer_size_tx = 1024; /* the forecast URL is ~350 characters */
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
         set_status("HTTP init failed");
         return false;
     }
-    const int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-        serial_log("[weather] GET %s -> %d", url.c_str(), code);
-        http.end();
-        set_status(code < 0 ? "Network error" : "Server error");
-        return false;
+    bool ok = false;
+    const esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        serial_log("[weather] GET %s -> %s", url.c_str(), esp_err_to_name(err));
+        set_status("Network error");
+    } else {
+        (void)esp_http_client_fetch_headers(client);
+        const int code = esp_http_client_get_status_code(client);
+        if (code != 200) {
+            serial_log("[weather] GET %s -> HTTP %d", url.c_str(), code);
+            set_status("Server error");
+        } else {
+            HttpBodyReader reader;
+            reader.client = client;
+            const DeserializationError jerr = deserializeJson(doc, reader);
+            if (jerr) {
+                serial_log("[weather] JSON error: %s", jerr.c_str());
+                set_status("Bad weather data");
+            } else {
+                ok = true;
+            }
+        }
     }
-    const DeserializationError err = deserializeJson(doc, http.getStream());
-    http.end();
-    if (err) {
-        serial_log("[weather] JSON error: %s", err.c_str());
-        set_status("Bad weather data");
-        return false;
-    }
-    return true;
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return ok;
 }
 
 /** Fill lat/lon/name/units from ip-api.com when /weather.ini doesn't give coordinates. */
@@ -273,7 +322,7 @@ void weather_begin(void) {
     if (s_task) {
         return;
     }
-    /* 10 KB: HTTPClient + JSON parsing; low priority so it never competes with the UI. */
+    /* 10 KB: HTTP client + JSON parsing; low priority so it never competes with the UI. */
     /* Core 1 (with Arduino loop): core 0 is busy with LVGL redraws and the WiFi stack. */
     xTaskCreatePinnedToCoreWithCaps(weather_task, "weather", 10240, nullptr, 1, &s_task, 1, MALLOC_CAP_SPIRAM); /* PSRAM stack: never touch flash (NVS etc.) here */
 }

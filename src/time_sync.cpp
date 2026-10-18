@@ -1,6 +1,7 @@
 #include "time_sync.h"
 
-#include <Arduino.h>
+#include <esp_sntp.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include "serial_log.h"
@@ -24,13 +25,18 @@ void time_sync_on_wifi_connected(void) {
     }
     s_sntp_started = true;
     /*
-     * configTime(0, 0, ...) would overwrite TZ with "UTC0" and wipe the timezone restored from SD.
-     * configTzTime re-applies the current TZ instead. Copy it first: setenv may free the old string.
+     * ESP-IDF SNTP (what Arduino's configTzTime wrapped): poll mode, two servers. The esp_sntp_*
+     * calls run on the lwIP thread, so no core lock is needed here. Server names are kept by
+     * pointer: string literals only. TZ is already set (restored from SD by clock_ui); tzset()
+     * just makes sure localtime() uses it.
      */
-    const char *cur = getenv("TZ");
-    const String tz = (cur && cur[0]) ? String(cur) : String("UTC0");
-    configTzTime(tz.c_str(), "pool.ntp.org", "time.google.com");
-    serial_log("[time] NTP configured (TZ %s)", tz.c_str());
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "time.google.com");
+    esp_sntp_init();
+    tzset();
+    const char *tz = getenv("TZ");
+    serial_log("[time] NTP configured (TZ %s)", (tz && tz[0]) ? tz : "UTC");
 }
 
 void time_sync_on_wifi_disconnected(void) {
