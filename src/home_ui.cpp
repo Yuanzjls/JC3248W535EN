@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include "air_ui.h"
+#include "ambient_ui.h"
 #include "breakout_ui.h"
 #include "clock_ui.h"
 #include "files_ui.h"
@@ -16,6 +17,7 @@
 #include "ui_theme.h"
 #include "weather_ui.h"
 #include "wifi_ui.h"
+#include "platform_time.h"
 
 static lv_obj_t *s_home_scr = nullptr;
 static lv_obj_t *s_bar = nullptr;
@@ -43,6 +45,16 @@ static void home_timer_cb(lv_timer_t *t) {
     if (lv_scr_act() != s_home_scr) {
         return;
     }
+    /* Idle on Home for the time set in Settings: ambient screen (retry at most once a minute). */
+    static uint32_t s_ambient_try_ms = 0;
+    const int idle_min = settings_get().ambient_min;
+    if (idle_min > 0 && lv_disp_get_inactive_time(nullptr) >= (uint32_t)idle_min * 60000U &&
+        (s_ambient_try_ms == 0 || now_ms() - s_ambient_try_ms > 60000)) {
+        s_ambient_try_ms = now_ms();
+        if (ambient_ui_open()) {
+            return;
+        }
+    }
     lv_label_set_text(s_weather_tile_temp, weather_ui_tile_text());
     lv_color_t air_color;
     lv_label_set_text(s_air_tile_val, air_ui_tile_text(&air_color));
@@ -61,6 +73,10 @@ static void home_timer_cb(lv_timer_t *t) {
     status_bar_set_title(s_bar, buf);
     settings_format_hm(buf, sizeof(buf), &ti, false);
     lv_label_set_text(s_clock_tile_time, buf);
+}
+
+static void open_ambient(void) {
+    (void)ambient_ui_open();
 }
 
 /* Home grid: 4 columns x 2 rows of 104 px cells (72 px tile + name) under the status bar. */
@@ -137,6 +153,8 @@ void home_ui_init(void) {
     s_air_tile_val = add_app_tile(apps, air_text, &lv_font_montserrat_24, "Air", air_color, air_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_SETTINGS, &lv_font_montserrat_30, "Settings",
                        lv_palette_main(LV_PALETTE_BLUE_GREY), settings_ui_open);
+    (void)add_app_tile(apps, LV_SYMBOL_IMAGE, &lv_font_montserrat_30, "Ambient",
+                       lv_palette_main(LV_PALETTE_LIGHT_BLUE), open_ambient);
 
     (void)lv_timer_create(home_timer_cb, 1000, nullptr);
 

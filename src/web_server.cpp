@@ -168,6 +168,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req) {
     doc["brightness"] = s.brightness;
     doc["units"] = units_name(s.units);
     doc["clock_24h"] = s.clock_24h;
+    doc["ambient_min"] = s.ambient_min;
     const char *tz = getenv("TZ");
     doc["timezone"] = tz ? tz : "";
     JsonArray list = doc["timezones"].to<JsonArray>();
@@ -210,6 +211,13 @@ static esp_err_t settings_post(httpd_req_t *req) {
             return send_text(req, "400 Bad Request", "units must be auto, celsius or fahrenheit");
         }
     }
+    int ambient = -1;
+    if (in["ambient_min"].is<int>()) {
+        ambient = in["ambient_min"].as<int>();
+        if (ambient != 0 && ambient != 1 && ambient != 3 && ambient != 5 && ambient != 10) {
+            return send_text(req, "400 Bad Request", "ambient_min must be 0, 1, 3, 5 or 10");
+        }
+    }
     const char *tz = nullptr;
     if (in["timezone"].is<const char *>()) {
         const char *want = in["timezone"];
@@ -236,6 +244,9 @@ static esp_err_t settings_post(httpd_req_t *req) {
     }
     if (in["clock_24h"].is<bool>()) {
         settings_set_clock_24h(in["clock_24h"].as<bool>());
+    }
+    if (ambient >= 0) {
+        settings_set_ambient_min(ambient);
     }
     if (tz) {
         const char *cur = getenv("TZ");

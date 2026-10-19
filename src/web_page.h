@@ -111,6 +111,11 @@ footer { color:var(--muted); font-size:12px; text-align:center; margin:8px 0 20p
   </div>
   <label for="tz">Timezone</label>
   <select id="tz"></select>
+  <label for="ambient">Ambient screen (animated weather clock) after idle on Home</label>
+  <select id="ambient">
+    <option value="0">Off</option><option value="1">1 min</option><option value="3">3 min</option>
+    <option value="5">5 min</option><option value="10">10 min</option>
+  </select>
   <button id="save_settings">Save settings</button><span class="msg" id="msg_settings"></span>
 </section>
 
@@ -222,6 +227,7 @@ async function loadSettings() {
   $('bright_v').textContent = s.brightness + ' %';
   radio('units', s.units);
   radio('clock', s.clock_24h ? '24' : '12');
+  $('ambient').value = String(s.ambient_min);
   const tz = $('tz');
   tz.innerHTML = '';
   for (const t of s.timezones) {
@@ -248,7 +254,7 @@ $('bright').addEventListener('input', () => { $('bright_v').textContent = $('bri
 document.querySelectorAll('input[name="locmode"]').forEach(r => r.addEventListener('change', showLocFields));
 
 $('save_settings').addEventListener('click', async () => {
-  const body = { brightness: +$('bright').value, units: picked('units'), clock_24h: picked('clock') === '24' };
+  const body = { brightness: +$('bright').value, units: picked('units'), clock_24h: picked('clock') === '24', ambient_min: +$('ambient').value };
   if ($('tz').value) body.timezone = $('tz').value;
   try { await postJson('/api/settings', body); say('msg_settings', 'Saved', true); loadStatus(); }
   catch (e) { say('msg_settings', 'Not saved: ' + e.message, false); }

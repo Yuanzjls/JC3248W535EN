@@ -15,15 +15,21 @@
  *   brightness=80
  *   units=auto        ; auto | celsius | fahrenheit
  *   clock=24h         ; 24h | 12h
+ *   ambient=3         ; idle minutes on Home before the ambient screen: 0 (off), 1, 3, 5, 10
  * Timezone is kept separately in /timezone.ini (timezone_ini.cpp).
  */
 static const char *k_path = "/settings.ini";
 static const int k_min_brightness = 10; /* never let the slider black out the screen */
 
-static AppSettings s_settings = {100, TempUnits::Auto, true};
+static AppSettings s_settings = {100, TempUnits::Auto, true, 3};
 
 static const char *units_name(TempUnits u) {
     return u == TempUnits::Celsius ? "celsius" : u == TempUnits::Fahrenheit ? "fahrenheit" : "auto";
+}
+
+/** Nearest allowed ambient timeout (0 = off). */
+static int snap_ambient(int m) {
+    return m <= 0 ? 0 : m <= 1 ? 1 : m <= 3 ? 3 : m <= 5 ? 5 : 10;
 }
 
 static int clamp_brightness(int v) {
@@ -32,8 +38,8 @@ static int clamp_brightness(int v) {
 
 static void save(void) {
     char text[160];
-    snprintf(text, sizeof(text), "[settings]\nbrightness=%d\nunits=%s\nclock=%s\n", s_settings.brightness,
-             units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h");
+    snprintf(text, sizeof(text), "[settings]\nbrightness=%d\nunits=%s\nclock=%s\nambient=%d\n", s_settings.brightness,
+             units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h", s_settings.ambient_min);
     if (!sd_write_text(k_path, text)) {
         serial_log("[settings] cannot write %s", k_path);
         return;
@@ -56,10 +62,12 @@ void settings_load(void) {
                                                             : TempUnits::Auto;
         } else if (key == "clock") {
             s_settings.clock_24h = !str_ieq(val, "12h");
+        } else if (key == "ambient") {
+            s_settings.ambient_min = snap_ambient(atoi(val.c_str()));
         }
     });
-    serial_log("[settings] brightness=%d units=%s clock=%s", s_settings.brightness, units_name(s_settings.units),
-               s_settings.clock_24h ? "24h" : "12h");
+    serial_log("[settings] brightness=%d units=%s clock=%s ambient=%d min", s_settings.brightness,
+               units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h", s_settings.ambient_min);
 }
 
 const AppSettings &settings_get(void) {
@@ -88,6 +96,15 @@ void settings_set_clock_24h(bool on) {
         return;
     }
     s_settings.clock_24h = on;
+    save();
+}
+
+void settings_set_ambient_min(int minutes) {
+    minutes = snap_ambient(minutes);
+    if (minutes == s_settings.ambient_min) {
+        return;
+    }
+    s_settings.ambient_min = minutes;
     save();
 }
 

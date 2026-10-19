@@ -58,6 +58,7 @@ static lv_obj_t *s_slider_val = nullptr;
 static lv_obj_t *s_tz_dd = nullptr;
 static lv_obj_t *s_units_bm = nullptr;
 static lv_obj_t *s_clock_bm = nullptr;
+static lv_obj_t *s_ambient_bm = nullptr;
 static lv_obj_t *s_about = nullptr;
 
 /* Live System card: one bar per meter, refreshed every second while Settings is visible. */
@@ -99,6 +100,15 @@ static void clock_fmt_cb(lv_event_t *e) {
     const uint16_t sel = lv_btnmatrix_get_selected_btn(s_clock_bm);
     if (sel <= 1) {
         settings_set_clock_24h(sel == 0);
+    }
+}
+
+static void ambient_cb(lv_event_t *e) {
+    LV_UNUSED(e);
+    static const int k_minutes[] = {0, 1, 3, 5, 10};
+    const uint16_t sel = lv_btnmatrix_get_selected_btn(s_ambient_bm);
+    if (sel < sizeof(k_minutes) / sizeof(k_minutes[0])) {
+        settings_set_ambient_min(k_minutes[sel]);
     }
 }
 
@@ -300,6 +310,12 @@ static void build_screen(void) {
     static const char *k_clock_map[] = {"24-hour", "12-hour", ""};
     s_clock_bm = add_segmented(row, k_clock_map, s.clock_24h ? 0 : 1, clock_fmt_cb);
 
+    /* Ambient screen (animated weather clock) after idle minutes on Home */
+    row = add_row(list, "Ambient screen");
+    static const char *k_ambient_map[] = {"Off", "1 min", "3 min", "5 min", "10 min", ""};
+    const int am = s.ambient_min;
+    s_ambient_bm = add_segmented(row, k_ambient_map, am == 0 ? 0 : am == 1 ? 1 : am == 3 ? 2 : am == 5 ? 3 : 4, ambient_cb);
+
     /* System: live CPU and memory */
     lv_obj_t *sys = lv_obj_create(list);
     ui_style_card(sys);
@@ -352,6 +368,6 @@ void settings_ui_release(void) {
     lv_timer_del(s_sys_timer); /* it reads the System card's widgets */
     s_sys_timer = nullptr;
     lv_obj_del(s_scr);
-    s_scr = s_slider = s_slider_val = s_tz_dd = s_units_bm = s_clock_bm = s_about = s_top_tasks = nullptr;
+    s_scr = s_slider = s_slider_val = s_tz_dd = s_units_bm = s_clock_bm = s_ambient_bm = s_about = s_top_tasks = nullptr;
     s_cpu0 = s_cpu1 = s_ram = s_psram = Meter{nullptr, nullptr};
 }

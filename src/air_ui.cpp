@@ -142,7 +142,10 @@ void air_ui_on_update(void) {
             lv_obj_set_style_text_color(s_radon, c, 0);
             if (d.radon_st >= 0) {
                 lv_label_set_text_fmt(s_radon, "%d", d.radon_st);
-                lv_label_set_text_fmt(s_radon_unit, "Bq/m3   (%.1f pCi/L)\nRadon, 24 h average", d.radon_st / 37.0f);
+                /* snprintf: LVGL's printf (lv_label_set_text_fmt) is built without float support */
+                char unit[64];
+                snprintf(unit, sizeof(unit), "Bq/m3   (%.1f pCi/L)\nRadon, 24 h average", d.radon_st / 37.0f);
+                lv_label_set_text(s_radon_unit, unit);
             } else {
                 lv_label_set_text(s_radon, "--");
                 lv_label_set_text(s_radon_unit, "Bq/m3\nRadon, 24 h average");
