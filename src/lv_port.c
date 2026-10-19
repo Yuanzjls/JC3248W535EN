@@ -622,6 +622,14 @@ static void lvgl_port_flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, 
 void lvgl_port_flush_frame(lv_disp_t *disp, const lv_color_t *frame)
 {
     assert(disp != NULL && frame != NULL);
+    /* Frames must be sent from core 0, where the display SPI interrupt runs (esp_bsp.c): from
+     * core 1 the SPI bus hand-over is eventually lost and the sender hangs holding the lock. */
+    static bool s_core_warned = false;
+    if (xPortGetCoreID() != 0 && !s_core_warned) {
+        s_core_warned = true;
+        serial_log("[lcd] WARNING: frame sent from core %d by \"%s\" - display senders must run on core 0",
+                   xPortGetCoreID(), pcTaskGetName(NULL));
+    }
     const lv_area_t area = {0, 0, (lv_coord_t)(disp->driver->hor_res - 1), (lv_coord_t)(disp->driver->ver_res - 1)};
     flush_area(disp->driver, &area, (lv_color_t *)frame);
 }

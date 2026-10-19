@@ -545,8 +545,14 @@ bool ambient_ui_open(void) {
         return false;
     }
     if (!s_task) {
-        /* Core 1 (core 0: LVGL and Wi-Fi), PSRAM stack: never touches flash. */
-        xTaskCreatePinnedToCoreWithCaps(ambient_task, "ambient", 6144, nullptr, 2, &s_task, 1,
+        /*
+         * Core 0, like every task that sends frames (LVGL task, video show task): the display's SPI
+         * interrupt is on core 0, and a sender on core 1 eventually hangs in spi_device_acquire_bus
+         * holding the display lock (full UI freeze - seen after ~80 min on core 1). Core 0 is
+         * nearly idle while this screen shows; priority 2 stays below LVGL (4) and Wi-Fi.
+         * PSRAM stack: never touches flash.
+         */
+        xTaskCreatePinnedToCoreWithCaps(ambient_task, "ambient", 6144, nullptr, 2, &s_task, 0,
                                         MALLOC_CAP_SPIRAM);
         if (!s_task) {
             return false;
