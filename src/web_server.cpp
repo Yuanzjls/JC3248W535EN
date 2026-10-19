@@ -18,6 +18,7 @@
 #include "weather.h"
 #include "weather_ui.h"
 #include "web_page.h"
+#include "web_files.h"
 #include "wifi_net.h"
 
 static httpd_handle_t s_server = nullptr;
@@ -280,6 +281,9 @@ void web_server_start(void) {
     cfg.core_id = 1;                                     /* core 0: LVGL task and Wi-Fi */
     cfg.max_open_sockets = 4;
     cfg.lru_purge_enable = true; /* a 5th client closes the least recently used socket */
+    cfg.max_uri_handlers = 16;
+    cfg.recv_wait_timeout = 10; /* big uploads / downloads over weak Wi-Fi */
+    cfg.send_wait_timeout = 10;
     const esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         serial_log("[web] server start failed: %s", esp_err_to_name(err));
@@ -296,5 +300,6 @@ void web_server_start(void) {
     for (const httpd_uri_t &r : k_routes) {
         httpd_register_uri_handler(s_server, &r);
     }
+    web_files_register(s_server);
     serial_log("[web] server started on port %u", (unsigned)cfg.server_port);
 }

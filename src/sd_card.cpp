@@ -129,7 +129,7 @@ extern "C" esp_err_t __wrap_sdmmc_init_sd_ssr(sdmmc_card_t *card) {
 static esp_vfs_fat_sdmmc_mount_config_t mount_config(void) {
     esp_vfs_fat_sdmmc_mount_config_t mount = {};
     mount.format_if_mount_failed = false; /* never wipe the user's card */
-    mount.max_files = 5;                  /* video: stream + index scan + cache, plus settings/weather */
+    mount.max_files = 8;                  /* video (stream + index scan + cache) + web upload/download + settings */
     mount.allocation_unit_size = 16 * 1024;
     return mount;
 }

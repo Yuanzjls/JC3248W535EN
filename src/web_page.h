@@ -34,6 +34,27 @@ button { margin-top:14px; padding:9px 16px; font:inherit; font-weight:600; color
 .msg { margin-left:10px; font-size:13px; }
 .ok { color:var(--ok); } .err { color:var(--err); }
 .hidden { display:none; }
+.crumbs { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:10px; font-size:14px; }
+.crumbs a { color:var(--accent); text-decoration:none; }
+.tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.tools button { margin-top:0; }
+button.light { color:var(--text); background:var(--bg); border:1px solid var(--line); }
+table { width:100%; border-collapse:collapse; margin-top:10px; font-size:14px; }
+td { padding:7px 4px; border-top:1px solid var(--line); vertical-align:middle; }
+td.n { width:100%; overflow-wrap:anywhere; }
+td.s, td.d { white-space:nowrap; color:var(--muted); font-size:13px; }
+td.a { white-space:nowrap; text-align:right; }
+td a { color:var(--text); text-decoration:none; }
+td a.dir { font-weight:600; }
+.icon { display:inline-block; width:1.4em; }
+.act { color:var(--muted); text-decoration:none; padding:2px 6px; border-radius:4px; cursor:pointer; background:none; border:0; font:inherit; margin:0; }
+.act:hover { background:var(--bg); color:var(--text); }
+.drop { border:2px dashed var(--line); border-radius:8px; padding:14px; text-align:center; color:var(--muted); margin-top:10px; font-size:14px; }
+.drop.over { border-color:var(--accent); color:var(--accent); }
+.bar { height:8px; background:var(--bg); border-radius:4px; overflow:hidden; margin-top:6px; }
+.bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+#up_status { font-size:13px; margin-top:6px; }
+@media (max-width:520px) { td.d { display:none; } }
 footer { color:var(--muted); font-size:12px; text-align:center; margin:8px 0 20px; }
 </style>
 </head>
@@ -110,7 +131,26 @@ footer { color:var(--muted); font-size:12px; text-align:center; margin:8px 0 20p
   <button id="save_loc">Save location</button><span class="msg" id="msg_loc"></span>
 </section>
 
-<footer>Refreshes every 10 s</footer>
+<section id="files_sec">
+  <h2>Files on the SD card</h2>
+  <div class="crumbs" id="crumbs"></div>
+  <div class="tools">
+    <button id="btn_upload">Upload files</button>
+    <button class="light" id="btn_mkdir">New folder</button>
+    <button class="light" id="btn_reload">Refresh</button>
+    <span class="msg" id="msg_files"></span>
+  </div>
+  <input type="file" id="file_input" multiple class="hidden">
+  <div class="drop" id="drop">or drop files here</div>
+  <div id="up_box" class="hidden">
+    <div id="up_status"></div>
+    <div class="bar"><div id="up_bar"></div></div>
+  </div>
+  <table><tbody id="file_rows"></tbody></table>
+  <div class="k" id="space" style="margin-top:10px"></div>
+</section>
+
+<footer>Status refreshes every 10 s</footer>
 </main>
 
 <script>
@@ -225,8 +265,166 @@ $('save_loc').addEventListener('click', async () => {
   catch (e) { say('msg_loc', 'Not saved: ' + e.message, false); }
 });
 
+/* ---------- files ---------- */
+let cwd = '/';
+let listing = null;
+const join = (dir, name) => (dir === '/' ? '' : dir) + '/' + name;
+const fileUrl = (p, extra) => '/api/file?path=' + encodeURIComponent(p) + (extra || '');
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+function fmtDate(t) {
+  if (!t) return '';
+  const d = new Date(t * 1000), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function el(tag, attrs, text) {
+  const e = document.createElement(tag);
+  for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+const fileIcon = name => /\.(jpe?g|png|bmp|gif)$/i.test(name) ? '🖼' : /\.(mjpe?g|mp4)$/i.test(name) ? '🎬'
+  : /\.(txt|ini|log|csv|json|md)$/i.test(name) ? '📄' : '📦';
+
+async function loadFiles(path) {
+  try {
+    const r = await fetch('/api/files?path=' + encodeURIComponent(path));
+    if (!r.ok) throw new Error(await r.text());
+    listing = await r.json();
+    cwd = listing.path;
+  } catch (e) { say('msg_files', 'Cannot list: ' + e.message, false); return; }
+
+  const crumbs = $('crumbs');
+  crumbs.textContent = '';
+  const parts = cwd.split('/').filter(Boolean);
+  const root = el('a', { href: '#' }, 'SD card');
+  root.onclick = ev => { ev.preventDefault(); loadFiles('/'); };
+  crumbs.appendChild(root);
+  parts.forEach((p, i) => {
+    crumbs.appendChild(el('span', {}, '/'));
+    const target = '/' + parts.slice(0, i + 1).join('/');
+    const a = el('a', { href: '#' }, p);
+    a.onclick = ev => { ev.preventDefault(); loadFiles(target); };
+    crumbs.appendChild(a);
+  });
+
+  const rows = $('file_rows');
+  rows.textContent = '';
+  const entries = listing.entries.slice().sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
+  if (cwd !== '/') {
+    const tr = el('tr'), td = el('td', { class: 'n', colspan: '4' });
+    const up = el('a', { href: '#', class: 'dir' });
+    up.appendChild(el('span', { class: 'icon' }, '⬆'));
+    up.appendChild(document.createTextNode('..'));
+    up.onclick = ev => { ev.preventDefault(); loadFiles(cwd.slice(0, cwd.lastIndexOf('/')) || '/'); };
+    td.appendChild(up); tr.appendChild(td); rows.appendChild(tr);
+  }
+  for (const e of entries) {
+    const tr = el('tr');
+    const p = join(cwd, e.name);
+    const n = el('td', { class: 'n' });
+    const a = el('a', e.dir ? { href: '#', class: 'dir' } : { href: fileUrl(p), target: '_blank' });
+    a.appendChild(el('span', { class: 'icon' }, e.dir ? '📁' : fileIcon(e.name)));
+    a.appendChild(document.createTextNode(e.name));
+    if (e.dir) a.onclick = ev => { ev.preventDefault(); loadFiles(p); };
+    n.appendChild(a);
+    tr.appendChild(n);
+    tr.appendChild(el('td', { class: 's' }, e.dir ? '' : fmtSize(e.size)));
+    tr.appendChild(el('td', { class: 'd' }, fmtDate(e.mtime)));
+    const act = el('td', { class: 'a' });
+    if (!e.dir) act.appendChild(el('a', { class: 'act', href: fileUrl(p, '&download=1'), title: 'Download' }, '⬇'));
+    const del = el('button', { class: 'act', title: 'Delete' }, '🗑');
+    del.onclick = () => removeEntry(p, e.dir);
+    act.appendChild(del);
+    tr.appendChild(act);
+    rows.appendChild(tr);
+  }
+  if (!entries.length) rows.appendChild(el('tr')).appendChild(el('td', { colspan: '4', class: 's' }, 'Empty folder'));
+  $('space').textContent = listing.total
+    ? `${fmtSize(listing.free)} free of ${fmtSize(listing.total)}` + (listing.truncated ? ' - folder has more entries than shown' : '')
+    : '';
+}
+
+async function removeEntry(p, isDir) {
+  if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${p}"?`)) return;
+  const r = await fetch(fileUrl(p), { method: 'DELETE' });
+  if (r.ok) say('msg_files', 'Deleted', true); else say('msg_files', 'Not deleted: ' + await r.text(), false);
+  loadFiles(cwd);
+}
+
+$('btn_mkdir').onclick = async () => {
+  const name = (prompt('New folder name') || '').trim();
+  if (!name) return;
+  try { await postJson('/api/mkdir', { path: join(cwd, name) }); say('msg_files', 'Folder created', true); }
+  catch (e) { say('msg_files', 'Not created: ' + e.message, false); }
+  loadFiles(cwd);
+};
+$('btn_reload').onclick = () => loadFiles(cwd);
+$('btn_upload').onclick = () => $('file_input').click();
+$('file_input').onchange = () => { uploadAll([...$('file_input').files]); $('file_input').value = ''; };
+
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(t => drop.addEventListener(t, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => uploadAll([...ev.dataTransfer.files]));
+
+let uploading = false;
+function uploadOne(file, path, overwrite, n, total) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const t0 = Date.now();
+    xhr.open('PUT', fileUrl(path, overwrite ? '&overwrite=1' : ''));
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = ev => {
+      if (!ev.lengthComputable) return;
+      const s = (Date.now() - t0) / 1000, rate = s > 0 ? ev.loaded / s : 0;
+      const left = rate > 0 ? Math.round((ev.total - ev.loaded) / rate) : 0;
+      $('up_bar').style.width = (100 * ev.loaded / ev.total).toFixed(1) + '%';
+      $('up_status').textContent = `${n}/${total}  ${file.name}: ${fmtSize(ev.loaded)} of ${fmtSize(ev.total)}`
+        + (rate ? `, ${fmtSize(rate)}/s, ${left} s left` : '');
+    };
+    xhr.onload = () => xhr.status === 200 ? resolve() : reject(new Error(xhr.responseText || xhr.statusText));
+    xhr.onerror = () => reject(new Error('connection lost'));
+    xhr.send(file);
+  });
+}
+
+async function uploadAll(files) {
+  if (uploading || !files.length) return;
+  uploading = true;
+  $('up_box').classList.remove('hidden');
+  let done = 0;
+  try {
+    let free = listing ? listing.free : Infinity;
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const existing = listing && listing.entries.find(e => e.name === f.name);
+      if (existing && existing.dir) { say('msg_files', `"${f.name}" is a folder here - skipped`, false); continue; }
+      if (existing && !confirm(`"${f.name}" exists. Replace it?`)) continue;
+      const needed = f.size - (existing ? existing.size : 0);
+      if (needed > free) { say('msg_files', `"${f.name}" (${fmtSize(f.size)}) does not fit: ${fmtSize(free)} free`, false); continue; }
+      $('up_bar').style.width = '0';
+      await uploadOne(f, join(cwd, f.name), !!existing, i + 1, files.length);
+      free -= needed;
+      done++;
+    }
+    say('msg_files', `Uploaded ${done} file(s)`, true);
+  } catch (e) {
+    say('msg_files', 'Upload failed: ' + e.message, false);
+  }
+  uploading = false;
+  $('up_box').classList.add('hidden');
+  loadFiles(cwd);
+}
+window.addEventListener('beforeunload', ev => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
+
 loadSettings();
 loadStatus();
+loadFiles('/');
 setInterval(loadStatus, 10000);
 </script>
 </body>
