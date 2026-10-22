@@ -1238,7 +1238,10 @@ CONFIG_ESP_DEBUG_OCDAWARE=y
 CONFIG_ESP_SYSTEM_CHECK_INT_LEVEL_4=y
 CONFIG_ESP_SYSTEM_BBPLL_RECALIB=y
 CONFIG_ESP_IPC_ENABLE=y
-CONFIG_ESP_IPC_TASK_STACK_SIZE=1024
+# 2048, not Arduino's 1024: BLE init allocates its interrupt from the IPC task (btdm_intr_alloc ->
+# esp_intr_alloc -> malloc with heap poisoning); an interrupt arriving then overflowed the stack
+# (core dump: DebugException in ipc_task).
+CONFIG_ESP_IPC_TASK_STACK_SIZE=2048
 CONFIG_ESP_IPC_USES_CALLERS_PRIORITY=y
 CONFIG_ESP_IPC_ISR_ENABLE=y
 CONFIG_ESP_TIMER_IN_IRAM=y
