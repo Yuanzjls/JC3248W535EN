@@ -115,19 +115,33 @@ static void save_config(void) {
 
 /* ---------- BLE ---------- */
 
-static void ensure_ble(void) {
+/**
+ * Start BLE on first use. False if internal RAM is too low: NimBLE needs ~44 KB of it, and when the
+ * controller's allocation fails the host task crashes (seen while music was playing) instead of
+ * init() returning an error - so check first and try again on the next read.
+ */
+static bool ensure_ble(void) {
+    static const uint32_t k_min_internal = 64 * 1024;
     if (s_ble_on) {
-        return;
+        return true;
     }
     const uint32_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (before < k_min_internal) {
+        serial_log("[air] not starting BLE: only %lu KB internal RAM free", (unsigned long)(before / 1024));
+        return false;
+    }
     NimBLEDevice::init("");
     s_ble_on = true;
     serial_log("[air] BLE started (internal RAM used: %lu KB)",
                (unsigned long)((before - heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) / 1024));
+    return true;
 }
 
 static void do_scan(void) {
-    ensure_ble();
+    if (!ensure_ble()) {
+        set_status("Not enough memory for Bluetooth - try again later");
+        return;
+    }
     set_status("Searching for Airthings sensors...");
     NimBLEScan *scan = NimBLEDevice::getScan();
     scan->setActiveScan(true);
@@ -200,7 +214,10 @@ static void do_read(void) {
         set_status("%s has no radon data this app can read", airthings_model_name(cfg.serial));
         return;
     }
-    ensure_ble();
+    if (!ensure_ble()) {
+        set_status("Not enough memory for Bluetooth - will retry");
+        return;
+    }
     set_status("Reading sensor...");
     const uint32_t t0 = now_ms();
 
