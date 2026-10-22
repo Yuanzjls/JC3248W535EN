@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <lvgl.h>
+#include <stdlib.h>
 #include <algorithm>
 #include <string>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include "app_settings.h"
 #include "audio_player.h"
 #include "cover_art.h"
+#include "lyrics.h"
 #include "platform_time.h"
 #include "sd_card.h"
 #include "serial_log.h"
@@ -25,6 +27,10 @@
  * to the track list. Playback itself runs in audio_player.cpp and continues after leaving this
  * screen; the screen only mirrors its status (timer) and sends commands. Cover art is decoded in
  * the background (cover_art.cpp) and shown when ready.
+ *
+ * The right side switches between Lyrics and Tracks. Lyrics come from lyrics.cpp (a .lrc next to
+ * the song, or LRCLIB); synced ones highlight the current line and keep it centred (paused for a
+ * few seconds after a manual scroll), and tapping a line seeks there.
  *
  * The list is the player's playlist, or - before anything was played, or after Refresh - every
  * MP3 under /music (subfolders included). Tapping a track plays the list from there; with shuffle
@@ -58,9 +64,21 @@ static std::string s_shown_path;  /* track the card / highlight currently show *
 static std::string s_shown_title;
 static int s_highlight = -1;
 
+static uint32_t s_shown_seq = 0;  /* AudioStatus::seq the cover and lyrics belong to */
+
 static lv_img_dsc_t s_cover_dsc;
 static uint16_t *s_cover_buf = nullptr; /* pixels behind s_cover_dsc */
 static uint32_t s_cover_id = 0;         /* bumped per track: older decodes are dropped */
+
+static lv_obj_t *s_view_bm = nullptr;         /* Lyrics | Tracks */
+static lv_obj_t *s_lyr = nullptr;             /* lyrics card (scrolls) */
+static int s_view = -1;                       /* 0 lyrics, 1 tracks; kept while the screen is released */
+static LyricsResult *s_lyr_res = nullptr;     /* lyrics on screen */
+static std::vector<lv_obj_t *> s_lyr_labels;  /* per line; nullptr for a pause (empty line) */
+static int s_lyr_cur = -1;                    /* highlighted line */
+static int s_lyr_word = -1;                   /* words of it shown as sung (word-timed lines) */
+static uint32_t s_lyr_id = 0;                 /* bumped per request: older results are dropped */
+static uint32_t s_lyr_user_ms = 0;            /* last manual scroll (0: none pending) */
 
 /* ---------- helpers ---------- */
 
@@ -71,6 +89,16 @@ static bool has_non_ascii(const char *s) {
         }
     }
     return false;
+}
+
+/**
+ * lv_label_set_text() invalidates even when the text is the same, and every redraw on this panel is
+ * a full frame (~80 ms): status labels updated by the timer only change when their text does.
+ */
+static void set_text_if_changed(lv_obj_t *lbl, const char *text) {
+    if (strcmp(lv_label_get_text(lbl), text) != 0) {
+        lv_label_set_text(lbl, text);
+    }
 }
 
 static void set_text_font(lv_obj_t *lbl, const char *text, const lv_font_t *ascii_font) {
@@ -257,16 +285,262 @@ static void load_library(void) {
     serial_log("[music] %s: %u track(s) in %lu ms", k_library_dir, (unsigned)tracks.size(), (unsigned long)(now_ms() - t0));
 }
 
+/* ---------- lyrics ---------- */
+
+static const int32_t k_lyr_lead_ms = 200;     /* highlight a line just before it is sung */
+static const uint32_t k_lyr_manual_ms = 4000; /* after a manual scroll, no auto-scroll for this long */
+
+static void lyrics_clear(void) {
+    if (s_lyr) {
+        lv_obj_clean(s_lyr);
+    }
+    s_lyr_labels.clear();
+    s_lyr_cur = -1;
+    s_lyr_word = -1;
+    delete s_lyr_res;
+    s_lyr_res = nullptr;
+}
+
+/** Scroll so line i is in the middle of the card. */
+static void lyrics_scroll_to(int i, lv_anim_enable_t anim) {
+    if (i < 0 || i >= (int)s_lyr_labels.size() || !s_lyr_labels[i]) {
+        return;
+    }
+    lv_obj_t *l = s_lyr_labels[i];
+    lv_obj_update_layout(s_lyr);
+    const lv_coord_t y = lv_obj_get_style_pad_top(s_lyr, 0) + lv_obj_get_y(l) + lv_obj_get_height(l) / 2 -
+                         lv_obj_get_height(s_lyr) / 2;
+    lv_obj_scroll_to_y(s_lyr, y, anim);
+}
+
+static lv_obj_t *lyrics_label(int i) {
+    return i >= 0 && i < (int)s_lyr_labels.size() ? s_lyr_labels[i] : nullptr;
+}
+
+/** Back to a plain, not-current line. */
+static void lyrics_reset_line(int i) {
+    lv_obj_t *l = lyrics_label(i);
+    if (l) {
+        lv_label_set_recolor(l, false);
+        lv_label_set_text(l, s_lyr_res->line(i));
+        lv_obj_set_style_text_color(l, ui_color_text_muted(), 0);
+    }
+}
+
+/**
+ * The current line with its first k words sung: those in the accent colour, the rest in the text
+ * colour (LVGL recolor markup "#RRGGBB text#"). Without word timing - or with a '#' in the text,
+ * which the markup can't escape inside a coloured run - the whole line is highlighted.
+ */
+static void lyrics_render_current(int i, int k) {
+    lv_obj_t *l = lyrics_label(i);
+    if (!l) {
+        return;
+    }
+    const LyricLine &ln = s_lyr_res->lines[i];
+    const char *text = s_lyr_res->line(i);
+    if (ln.nwords == 0 || strchr(text, '#')) {
+        lv_obj_set_style_text_color(l, lv_palette_main(LV_PALETTE_PINK), 0);
+        return;
+    }
+    const size_t len = strlen(text);
+    const size_t split = k <= 0 ? 0 : k >= (int)ln.nwords ? len : s_lyr_res->words[ln.word0 + k].pos;
+    std::string m;
+    if (split > 0) {
+        m = "#E91E63 "; /* LV_PALETTE_PINK */
+        m.append(text, split);
+        m += '#';
+    }
+    m.append(text + split, len - split);
+    lv_obj_set_style_text_color(l, ui_color_text(), 0);
+    lv_label_set_recolor(l, true);
+    lv_label_set_text(l, m.c_str());
+}
+
+static void lyrics_load(const AudioStatus &st, bool retry);
+
+static void lyrics_retry_cb(lv_event_t *e) {
+    LV_UNUSED(e);
+    AudioStatus st;
+    audio_get_status(&st);
+    lyrics_load(st, true);
+}
+
+/** A message instead of lyrics, optionally with "Search again". */
+static void lyrics_note(const char *text, bool retry) {
+    lyrics_clear();
+    lv_obj_t *lbl = lv_label_create(s_lyr);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl, ui_color_text_muted(), 0);
+    lv_label_set_text(lbl, text);
+    if (retry) {
+        lv_obj_t *btn = lv_btn_create(s_lyr);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, lyrics_retry_cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *bl = lv_label_create(btn);
+        lv_label_set_text(bl, LV_SYMBOL_REFRESH "  Search again");
+    }
+    lv_obj_scroll_to_y(s_lyr, 0, LV_ANIM_OFF);
+}
+
+/** Tap on a synced line: play from there. */
+static void lyrics_line_cb(lv_event_t *e) {
+    const size_t i = (size_t)(uintptr_t)lv_event_get_user_data(e);
+    AudioStatus st;
+    audio_get_status(&st);
+    if (s_lyr_res && i < s_lyr_res->lines.size() && st.dur_s > 0) {
+        audio_seek(s_lyr_res->lines[i].ms / 1000.0f / st.dur_s);
+        s_lyr_user_ms = 0; /* follow the song again right away */
+    }
+}
+
+/** Show a result (takes ownership). */
+static void lyrics_show(LyricsResult *r) {
+    if (r->kind == LyricsKind::None) {
+        lyrics_note(r->note.c_str(), r->can_retry);
+        delete r;
+        return;
+    }
+    lyrics_clear();
+    s_lyr_res = r;
+    const bool synced = r->kind == LyricsKind::Synced;
+    bool cjk = false; /* one font for the whole song */
+    for (size_t i = 0; i < r->lines.size() && !cjk; i++) {
+        cjk = has_non_ascii(r->line(i));
+    }
+    for (size_t i = 0; i < r->lines.size(); i++) {
+        const char *text = r->line(i);
+        if (!text[0]) {
+            s_lyr_labels.push_back(nullptr); /* a pause: nothing highlighted */
+            continue;
+        }
+        lv_obj_t *lbl = lv_label_create(s_lyr);
+        lv_obj_set_width(lbl, LV_PCT(100));
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(lbl, cjk ? ui_font_get() : &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(lbl, synced ? ui_color_text_muted() : ui_color_text(), 0);
+        lv_label_set_text(lbl, text);
+        if (synced) {
+            lv_obj_add_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(lbl, lyrics_line_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+        }
+        s_lyr_labels.push_back(lbl);
+    }
+    s_lyr_user_ms = 0;
+    lv_obj_scroll_to_y(s_lyr, 0, LV_ANIM_OFF);
+}
+
+/** New track (or Search again): ask for its lyrics. */
+static void lyrics_load(const AudioStatus &st, bool retry) {
+    s_lyr_id++;
+    if (st.path.empty() || st.error) {
+        lyrics_note("Lyrics appear here when a song plays", false);
+        return;
+    }
+    lyrics_note("Looking for lyrics...", false);
+    lyrics_request(st.path, st.title, st.artist, st.dur_s, s_lyr_id, retry);
+}
+
+static void lyrics_poll(void) {
+    LyricsResult *r = lyrics_take();
+    if (!r) {
+        return;
+    }
+    if (r->id != s_lyr_id) {
+        delete r; /* for a track that is no longer current */
+        return;
+    }
+    lyrics_show(r);
+}
+
+/**
+ * Highlight the line being sung - word by word when the lyrics have word timing - and keep it
+ * centred unless the user is scrolling.
+ */
+static void lyrics_tick(const AudioStatus &st) {
+    if (!s_lyr_res || s_lyr_res->kind != LyricsKind::Synced) {
+        return;
+    }
+    const int32_t pos_ms = (int32_t)(st.pos_s * 1000) + k_lyr_lead_ms;
+    int cur = -1;
+    for (size_t i = 0; i < s_lyr_res->lines.size() && s_lyr_res->lines[i].ms <= pos_ms; i++) {
+        cur = (int)i;
+    }
+    const bool manual = s_lyr_user_ms != 0 && now_ms() - s_lyr_user_ms < k_lyr_manual_ms;
+    if (!manual && s_lyr_user_ms != 0) {
+        s_lyr_user_ms = 0; /* manual scroll timed out: back to the current line */
+        lyrics_scroll_to(s_lyr_cur, LV_ANIM_ON);
+    }
+    if (cur != s_lyr_cur) {
+        lyrics_reset_line(s_lyr_cur);
+        s_lyr_cur = cur;
+        s_lyr_word = -1;
+        if (!manual && s_view == 0) {
+            lyrics_scroll_to(cur, LV_ANIM_ON);
+        }
+    }
+    if (cur < 0) {
+        return;
+    }
+    const LyricLine &ln = s_lyr_res->lines[cur];
+    int k = 0;
+    for (uint32_t w = 0; w < ln.nwords && s_lyr_res->words[ln.word0 + w].ms <= pos_ms; w++) {
+        k++;
+    }
+    if (k != s_lyr_word) {
+        s_lyr_word = k;
+        lyrics_render_current(cur, k);
+    }
+}
+
+/** Scrolls started by a finger pause the auto-scroll (programmatic ones have no active input). */
+static void lyrics_scroll_cb(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_SCROLL_BEGIN && lv_indev_get_act()) {
+        s_lyr_user_ms = now_ms() | 1;
+    } else if (code == LV_EVENT_SCROLL_END && s_lyr_user_ms != 0) {
+        s_lyr_user_ms = now_ms() | 1; /* count from the end of the fling */
+    }
+}
+
+static void show_view(int v) {
+    s_view = v;
+    lv_obj_add_flag(v == 0 ? s_list : s_lyr, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(v == 0 ? s_lyr : s_list, LV_OBJ_FLAG_HIDDEN);
+    lv_btnmatrix_set_btn_ctrl(s_view_bm, v, LV_BTNMATRIX_CTRL_CHECKED);
+    if (v == 0) {
+        s_lyr_user_ms = 0;
+        lyrics_scroll_to(s_lyr_cur, LV_ANIM_OFF);
+    }
+}
+
+static void view_cb(lv_event_t *e) {
+    LV_UNUSED(e);
+    const uint16_t sel = lv_btnmatrix_get_selected_btn(s_view_bm);
+    if (sel <= 1) {
+        show_view(sel);
+    }
+}
+
 /* ---------- now playing ---------- */
 
 static void refresh(void) {
     AudioStatus st;
     audio_get_status(&st);
 
+    if (st.seq != s_shown_seq) { /* a new track's details are complete */
+        s_shown_seq = st.seq;
+        cover_load(st);
+        lyrics_load(st, false);
+    }
+    lyrics_poll();
+    lyrics_tick(st);
+
     if (st.path != s_shown_path || st.title != s_shown_title) {
-        if (st.path != s_shown_path) {
-            cover_load(st);
-        }
         s_shown_path = st.path;
         s_shown_title = st.title;
         const char *title = st.path.empty() ? "Not playing" : st.title.c_str();
@@ -293,35 +567,40 @@ static void refresh(void) {
     }
     cover_poll();
 
+    char buf[64];
     if (st.error && st.state == AudioState::Stopped) {
-        lv_label_set_text(s_info, "Could not play this file");
+        set_text_if_changed(s_info, "Could not play this file");
     } else if (st.sample_rate) {
-        lv_label_set_text_fmt(s_info, "%lu.%lu kHz  %lu kbps\nTrack %u of %u", (unsigned long)(st.sample_rate / 1000),
-                              (unsigned long)(st.sample_rate % 1000 / 100), (unsigned long)st.bitrate_kbps,
-                              (unsigned)(st.index + 1), (unsigned)st.count);
+        snprintf(buf, sizeof(buf), "%lu.%lu kHz  %lu kbps\nTrack %u of %u", (unsigned long)(st.sample_rate / 1000),
+                 (unsigned long)(st.sample_rate % 1000 / 100), (unsigned long)st.bitrate_kbps, (unsigned)(st.index + 1),
+                 (unsigned)st.count);
+        set_text_if_changed(s_info, buf);
     } else {
-        lv_label_set_text(s_info, "");
+        set_text_if_changed(s_info, "");
     }
 
-    lv_label_set_text(s_play_lbl, st.state == AudioState::Playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    set_text_if_changed(s_play_lbl, st.state == AudioState::Playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
 
-    char buf[16];
     if (st.dur_s > 0) {
         lv_obj_clear_state(s_seek, LV_STATE_DISABLED);
     } else {
         lv_obj_add_state(s_seek, LV_STATE_DISABLED);
     }
     if (!lv_obj_has_state(s_seek, LV_STATE_PRESSED)) { /* don't fight a drag */
-        const int permille = st.dur_s > 0 ? (int)(st.pos_s / st.dur_s * 1000) : 0;
-        lv_slider_set_value(s_seek, permille > 1000 ? 1000 : permille, LV_ANIM_OFF);
+        int permille = st.dur_s > 0 ? (int)(st.pos_s / st.dur_s * 1000) : 0;
+        permille = permille > 1000 ? 1000 : permille;
+        /* Steps of 0.5 %: the knob moves less than a pixel per permille, and every change is a redraw. */
+        if (abs(permille - lv_slider_get_value(s_seek)) >= 5 || permille == 0) {
+            lv_slider_set_value(s_seek, permille, LV_ANIM_OFF);
+        }
         fmt_time(buf, sizeof(buf), st.pos_s);
-        lv_label_set_text(s_pos_lbl, buf);
+        set_text_if_changed(s_pos_lbl, buf);
     }
     if (st.dur_s > 0) {
         fmt_time(buf, sizeof(buf), st.dur_s);
-        lv_label_set_text(s_dur_lbl, buf);
+        set_text_if_changed(s_dur_lbl, buf);
     } else {
-        lv_label_set_text(s_dur_lbl, "--:--");
+        set_text_if_changed(s_dur_lbl, "--:--");
     }
 }
 
@@ -575,16 +854,47 @@ static void build_screen(void) {
     lv_obj_add_flag(card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_add_flag(body, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
-    /* Track list */
-    s_list = lv_obj_create(body);
+    /* Right side: [Lyrics | Tracks] over the lyrics card or the track list */
+    lv_obj_t *right = lv_obj_create(body);
+    lv_obj_remove_style_all(right);
+    lv_obj_set_height(right, LV_PCT(100));
+    lv_obj_set_flex_grow(right, 1);
+    lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(right, 6, 0);
+    lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const char *k_view_map[] = {"Lyrics", "Tracks", ""};
+    s_view_bm = lv_btnmatrix_create(right);
+    lv_btnmatrix_set_map(s_view_bm, k_view_map);
+    lv_btnmatrix_set_btn_ctrl_all(s_view_bm, LV_BTNMATRIX_CTRL_CHECKABLE);
+    lv_btnmatrix_set_one_checked(s_view_bm, true);
+    lv_obj_set_size(s_view_bm, LV_PCT(100), 32);
+    ui_style_segmented(s_view_bm);
+    lv_obj_add_event_cb(s_view_bm, view_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_lyr = lv_obj_create(right);
+    ui_style_card(s_lyr);
+    lv_obj_set_width(s_lyr, LV_PCT(100));
+    lv_obj_set_flex_grow(s_lyr, 1);
+    lv_obj_set_style_pad_hor(s_lyr, 10, 0);
+    lv_obj_set_style_pad_ver(s_lyr, 80, 0); /* lets the first and last lines reach the middle */
+    lv_obj_set_style_pad_row(s_lyr, 10, 0);
+    lv_obj_set_flex_flow(s_lyr, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_lyr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(s_lyr, LV_DIR_VER);
+    lv_obj_add_event_cb(s_lyr, lyrics_scroll_cb, LV_EVENT_SCROLL_BEGIN, nullptr);
+    lv_obj_add_event_cb(s_lyr, lyrics_scroll_cb, LV_EVENT_SCROLL_END, nullptr);
+    lyrics_note("Lyrics appear here when a song plays", false);
+
+    s_list = lv_obj_create(right);
     ui_style_card(s_list);
-    lv_obj_set_height(s_list, LV_PCT(100));
+    lv_obj_set_width(s_list, LV_PCT(100));
     lv_obj_set_flex_grow(s_list, 1);
     lv_obj_set_style_pad_all(s_list, 0, 0);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
 
-    s_timer = lv_timer_create(timer_cb, 250, nullptr);
+    s_timer = lv_timer_create(timer_cb, 100, nullptr); /* word-timed lyrics: words are ~200 ms apart */
 }
 
 void music_ui_open(void) {
@@ -595,6 +905,10 @@ void music_ui_open(void) {
     } else if (s_tracks.empty()) {
         load_library();
     }
+    if (s_view < 0) {
+        s_view = playlist.empty() ? 1 : 0; /* first time: pick songs, or watch the lyrics */
+    }
+    show_view(s_view);
     lv_scr_load(s_scr);
     refresh();
 }
@@ -606,7 +920,11 @@ void music_ui_release(void) {
     lv_timer_del(s_timer);
     cover_clear();
     s_cover_id++; /* a decode still running is dropped when it arrives */
+    lyrics_clear();
+    s_lyr_id++;   /* likewise a lookup */
+    s_shown_seq = 0;
     lv_obj_del(s_scr);
+    s_view_bm = s_lyr = nullptr;
     s_scr = s_list = s_cover_img = s_cover_icon = s_title = s_artist = s_info = nullptr;
     s_seek = s_pos_lbl = s_dur_lbl = s_play_lbl = s_vol = s_vol_lbl = nullptr;
     s_timer = nullptr;

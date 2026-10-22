@@ -27,6 +27,7 @@ struct AudioStatus {
     uint32_t cover_off = 0; /* embedded picture (ID3 APIC): JPEG / PNG bytes in the file */
     uint32_t cover_len = 0; /* 0 = none */
     bool error = false; /* last track could not be opened / decoded */
+    uint32_t seq = 0;   /* bumped once a track's details (title, cover, duration) are complete, or it failed */
 };
 
 /** True for names the player can play (.mp3). */

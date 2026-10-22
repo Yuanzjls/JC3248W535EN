@@ -491,6 +491,7 @@ static bool track_open(size_t index) {
     s_status.bitrate_kbps = kbps;
     s_status.cover_off = tag.cover_off;
     s_status.cover_len = tag.cover_len;
+    s_status.seq++;
     unlock();
     serial_log("[audio] %s: %lu Hz, %lu kbps, %.0f s%s%s", path.c_str(), (unsigned long)rate, (unsigned long)kbps,
                s_t.dur_s, s_t.has_toc ? " (VBR)" : "", tag.cover_len ? ", cover" : "");
@@ -650,6 +651,7 @@ static void start_at(size_t pos, bool wrap) {
         }
         lock();
         s_status.error = true;
+        s_status.seq++;
         unlock();
     }
     track_close();

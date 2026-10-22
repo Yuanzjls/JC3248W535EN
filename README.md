@@ -47,6 +47,16 @@ going in the background; an `.mp3` opened in Files plays that folder. The speake
 "Speak" connector) is driven by the on-board NS4168 mono I2S amplifier (BCLK IO42, LRCLK IO2,
 DIN IO41), so stereo is mixed down to mono.
 
+Lyrics: a `<song>.lrc` next to the MP3 is used as is (UTF-8; line-synced, word-synced
+"enhanced LRC" or plain text). Otherwise they are looked up on [LRCLIB](https://lrclib.net) by
+title, artist and duration (needs Wi-Fi) and saved as `<song>.lrc`; songs with no match are
+remembered in `.cache/lyrics/`. Title and artist come from the ID3 tag, else from an
+"Artist - Title" file name - use the names LRCLIB knows (e.g. the original-language title).
+
+At high volume on a PC's USB port, the amplifier can pull the 5 V supply down far enough that
+the board drops off USB and restarts (reset reason "USB reset", no panic). Use a charger or the
+battery for loud playback.
+
 Videos: raw MJPEG (`.mjpeg` / `.mjpg`), ideally 480x320; `_15fps` in the file name sets the rate
 (default 24).
 
