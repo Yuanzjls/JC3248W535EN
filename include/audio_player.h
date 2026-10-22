@@ -24,6 +24,8 @@ struct AudioStatus {
     float dur_s = 0; /* 0 if unknown */
     uint32_t sample_rate = 0;
     uint32_t bitrate_kbps = 0;
+    uint32_t cover_off = 0; /* embedded picture (ID3 APIC): JPEG / PNG bytes in the file */
+    uint32_t cover_len = 0; /* 0 = none */
     bool error = false; /* last track could not be opened / decoded */
 };
 

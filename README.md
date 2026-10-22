@@ -42,7 +42,7 @@ Everything persistent lives on the card (FAT), nothing in internal flash:
 | `.cache/mjpeg/` | video frame indexes (rebuilt if deleted) |
 
 Music: MP3 (MPEG-1/2/2.5, CBR or VBR), decoded with minimp3 (vendored in `src/minimp3/`); ID3
-title and artist are shown. Playback keeps
+title, artist and embedded cover art (JPEG / PNG) are shown. Playback keeps
 going in the background; an `.mp3` opened in Files plays that folder. The speaker (2-pin
 "Speak" connector) is driven by the on-board NS4168 mono I2S amplifier (BCLK IO42, LRCLK IO2,
 DIN IO41), so stereo is mixed down to mono.

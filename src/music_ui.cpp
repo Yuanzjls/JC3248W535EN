@@ -1,6 +1,7 @@
 #include "music_ui.h"
 
 #include <dirent.h>
+#include <esp_heap_caps.h>
 #include <lvgl.h>
 #include <algorithm>
 #include <string>
@@ -10,6 +11,7 @@
 
 #include "app_settings.h"
 #include "audio_player.h"
+#include "cover_art.h"
 #include "platform_time.h"
 #include "sd_card.h"
 #include "serial_log.h"
@@ -18,9 +20,10 @@
 #include "ui_theme.h"
 
 /*
- * Music player: now-playing card (title, artist, seek bar, prev / play / next, volume) next to the
- * track list. Playback itself runs in audio_player.cpp and continues after leaving this screen;
- * the screen only mirrors its status (timer) and sends commands.
+ * Music player: now-playing card (cover, title, artist, seek bar, prev / play / next, volume) next
+ * to the track list. Playback itself runs in audio_player.cpp and continues after leaving this
+ * screen; the screen only mirrors its status (timer) and sends commands. Cover art is decoded in
+ * the background (cover_art.cpp) and shown when ready.
  *
  * The list is the player's playlist, or - before anything was played, or after Refresh - every
  * MP3 under /music (subfolders included). Tapping a track plays the list from there.
@@ -29,9 +32,12 @@
 static const char *k_library_dir = "/music";
 static const size_t k_max_tracks = 300;
 static const int k_max_depth = 3;
+static const int k_cover = 96; /* cover art box, px */
 
 static lv_obj_t *s_scr = nullptr;
 static lv_obj_t *s_list = nullptr;
+static lv_obj_t *s_cover_img = nullptr;
+static lv_obj_t *s_cover_icon = nullptr; /* placeholder while there is no picture */
 static lv_obj_t *s_title = nullptr;
 static lv_obj_t *s_artist = nullptr;
 static lv_obj_t *s_info = nullptr;
@@ -48,6 +54,10 @@ static std::vector<lv_obj_t *> s_rows;
 static std::string s_shown_path;  /* track the card / highlight currently show */
 static std::string s_shown_title;
 static int s_highlight = -1;
+
+static lv_img_dsc_t s_cover_dsc;
+static uint16_t *s_cover_buf = nullptr; /* pixels behind s_cover_dsc */
+static uint32_t s_cover_id = 0;         /* bumped per track: older decodes are dropped */
 
 /* ---------- helpers ---------- */
 
@@ -103,6 +113,57 @@ static void scan_dir(const std::string &dir, int depth, std::vector<std::string>
         }
     }
     closedir(d);
+}
+
+/* ---------- cover ---------- */
+
+/** Back to the placeholder and free the picture. */
+static void cover_clear(void) {
+    if (s_cover_img) {
+        lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(s_cover_img, nullptr);
+        lv_obj_clear_flag(s_cover_icon, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_cover_buf) {
+        lv_img_cache_invalidate_src(&s_cover_dsc);
+        heap_caps_free(s_cover_buf);
+        s_cover_buf = nullptr;
+    }
+}
+
+/** New track: drop the old picture and start decoding the new one (if the file has one). */
+static void cover_load(const AudioStatus &st) {
+    cover_clear();
+    s_cover_id++;
+    if (st.cover_len > 0) {
+        cover_art_request(st.path.c_str(), st.cover_off, st.cover_len, k_cover, s_cover_id);
+    }
+}
+
+/** Show a finished decode for the current track; discard stale ones. */
+static void cover_poll(void) {
+    uint32_t id;
+    uint16_t *buf;
+    int w, h;
+    if (!cover_art_take(&id, &buf, &w, &h)) {
+        return;
+    }
+    if (id != s_cover_id || !buf || !s_cover_img) {
+        heap_caps_free(buf);
+        return;
+    }
+    cover_clear();
+    s_cover_buf = buf;
+    memset(&s_cover_dsc, 0, sizeof(s_cover_dsc));
+    s_cover_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+    s_cover_dsc.header.w = w;
+    s_cover_dsc.header.h = h;
+    s_cover_dsc.data_size = (uint32_t)w * h * 2;
+    s_cover_dsc.data = (const uint8_t *)buf;
+    lv_img_set_src(s_cover_img, &s_cover_dsc);
+    lv_obj_center(s_cover_img);
+    lv_obj_clear_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_cover_icon, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ---------- list ---------- */
@@ -200,6 +261,9 @@ static void refresh(void) {
     audio_get_status(&st);
 
     if (st.path != s_shown_path || st.title != s_shown_title) {
+        if (st.path != s_shown_path) {
+            cover_load(st);
+        }
         s_shown_path = st.path;
         s_shown_title = st.title;
         const char *title = st.path.empty() ? "Not playing" : st.title.c_str();
@@ -224,6 +288,7 @@ static void refresh(void) {
             }
         }
     }
+    cover_poll();
 
     if (st.error && st.state == AudioState::Stopped) {
         lv_label_set_text(s_info, "Could not play this file");
@@ -411,9 +476,30 @@ static void build_screen(void) {
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *text = lv_obj_create(card);
+    lv_obj_t *top = add_plain_row(card);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(top, 10, 0);
+
+    lv_obj_t *cover = lv_obj_create(top);
+    lv_obj_remove_style_all(cover);
+    lv_obj_set_size(cover, k_cover, k_cover);
+    lv_obj_set_style_radius(cover, 8, 0);
+    lv_obj_set_style_clip_corner(cover, true, 0);
+    lv_obj_set_style_bg_opa(cover, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(cover, lv_palette_lighten(LV_PALETTE_PINK, 4), 0);
+    lv_obj_clear_flag(cover, LV_OBJ_FLAG_SCROLLABLE);
+    s_cover_icon = lv_label_create(cover);
+    lv_obj_set_style_text_font(s_cover_icon, &lv_font_montserrat_30, 0);
+    lv_obj_set_style_text_color(s_cover_icon, lv_palette_main(LV_PALETTE_PINK), 0);
+    lv_label_set_text(s_cover_icon, LV_SYMBOL_AUDIO);
+    lv_obj_center(s_cover_icon);
+    s_cover_img = lv_img_create(cover);
+    lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *text = lv_obj_create(top);
     lv_obj_remove_style_all(text);
-    lv_obj_set_size(text, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_height(text, k_cover);
+    lv_obj_set_flex_grow(text, 1);
     lv_obj_set_flex_flow(text, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(text, 2, 0);
     lv_obj_clear_flag(text, LV_OBJ_FLAG_SCROLLABLE);
@@ -500,8 +586,10 @@ void music_ui_release(void) {
         return;
     }
     lv_timer_del(s_timer);
+    cover_clear();
+    s_cover_id++; /* a decode still running is dropped when it arrives */
     lv_obj_del(s_scr);
-    s_scr = s_list = s_title = s_artist = s_info = nullptr;
+    s_scr = s_list = s_cover_img = s_cover_icon = s_title = s_artist = s_info = nullptr;
     s_seek = s_pos_lbl = s_dur_lbl = s_play_lbl = s_vol = s_vol_lbl = nullptr;
     s_timer = nullptr;
     s_tracks.clear();

@@ -41,6 +41,7 @@ static const size_t k_in_buf = 16 * 1024;       /* minimp3 syncs on several fram
 static const int k_refill_at = 8 * 1024;
 static const uint32_t k_task_stack = 24 * 1024;
 static const uint32_t k_max_text = 1024;        /* longest ID3 title / artist frame read */
+static const size_t k_pic_head = 256;           /* APIC bytes read to find where the picture starts */
 static const float k_restart_prev_s = 3.0f;     /* Prev restarts the track after this */
 static const int k_max_tries = 64;              /* decode calls without a frame before giving up */
 
@@ -171,11 +172,47 @@ static std::string id3_text(const uint8_t *p, size_t n) {
 
 struct TagInfo {
     std::string title, artist;
+    uint32_t cover_off = 0, cover_len = 0;
+    bool cover_front = false; /* picture type 3 "front cover" */
 };
 
 /**
+ * Where the picture data starts in an APIC / PIC frame body (encoding, MIME type or 3-letter
+ * format, picture type, description, data). 0 if the header doesn't fit in `n` bytes.
+ */
+static size_t picture_data_start(const uint8_t *b, size_t n, bool v22, uint8_t *type) {
+    const uint8_t enc = b[0];
+    size_t i = 1;
+    if (v22) {
+        i += 3;
+    } else {
+        while (i < n && b[i]) {
+            i++;
+        }
+        i++;
+    }
+    if (i >= n) {
+        return 0;
+    }
+    *type = b[i++];
+    if (enc == 1 || enc == 2) { /* UTF-16 description: ends with a 16-bit zero */
+        while (i + 1 < n && (b[i] || b[i + 1])) {
+            i += 2;
+        }
+        i += 2;
+    } else {
+        while (i < n && b[i]) {
+            i++;
+        }
+        i++;
+    }
+    return i < n ? i : 0;
+}
+
+/**
  * Walk the ID3v2 tag at the start of the file frame by frame (only small reads, so a large cover
- * image costs nothing here). Returns where the audio starts; fills title and artist.
+ * image costs nothing here). Returns where the audio starts; fills title, artist and the cover's
+ * location.
  */
 static uint32_t parse_id3v2(int fd, TagInfo *tag) {
     uint8_t h[10];
@@ -189,6 +226,9 @@ static uint32_t parse_id3v2(int fd, TagInfo *tag) {
     if (ver < 2 || ver > 4) {
         return audio_start;
     }
+    /* Whole-tag unsynchronisation (v2.2 / v2.3) alters binary data: text is fine, pictures are not. */
+    const bool tag_unsync = ver < 4 && (flags & 0x80);
+
     uint32_t pos = 10;
     if ((flags & 0x40) && ver >= 3) { /* extended header */
         uint8_t x[4];
@@ -198,7 +238,7 @@ static uint32_t parse_id3v2(int fd, TagInfo *tag) {
         pos += ver == 4 ? syncsafe32(x) : 4 + be32(x);
     }
     const uint32_t hdr = ver == 2 ? 6 : 10;
-    uint8_t *body = (uint8_t *)malloc(k_max_text);
+    uint8_t *body = (uint8_t *)malloc(k_max_text > k_pic_head ? k_max_text : k_pic_head);
     if (!body) {
         return audio_start;
     }
@@ -226,10 +266,20 @@ static uint32_t parse_id3v2(int fd, TagInfo *tag) {
 
         const bool is_title = ver == 2 ? memcmp(f, "TT2", 3) == 0 : memcmp(f, "TIT2", 4) == 0;
         const bool is_artist = ver == 2 ? memcmp(f, "TP1", 3) == 0 : memcmp(f, "TPE1", 4) == 0;
+        const bool is_pic = ver == 2 ? memcmp(f, "PIC", 3) == 0 : memcmp(f, "APIC", 4) == 0;
         if ((is_title || is_artist) && plain && len <= k_max_text && read_at(fd, data, body, len)) {
             std::string text = id3_text(body, len);
             if (!text.empty()) {
                 *(is_title ? &tag->title : &tag->artist) = text;
+            }
+        } else if (is_pic && plain && !tag_unsync && !tag->cover_front) {
+            const size_t n = len < k_pic_head ? len : k_pic_head;
+            uint8_t type = 0;
+            const size_t at = read_at(fd, data, body, n) ? picture_data_start(body, n, ver == 2, &type) : 0;
+            if (at > 0 && (tag->cover_len == 0 || type == 3)) { /* first picture, or the front cover */
+                tag->cover_off = data + at;
+                tag->cover_len = len - at;
+                tag->cover_front = type == 3;
             }
         }
         pos += hdr + fsize;
@@ -396,6 +446,7 @@ static bool track_open(size_t index) {
     s_status.artist.clear();
     s_status.pos_s = s_status.dur_s = 0;
     s_status.sample_rate = s_status.bitrate_kbps = 0;
+    s_status.cover_off = s_status.cover_len = 0;
     s_status.error = false;
     unlock();
     if (path.empty()) {
@@ -416,6 +467,9 @@ static bool track_open(size_t index) {
     if (size >= 128 && read_at(s_t.fd, size - 128, v1, sizeof(v1)) && memcmp(v1, "TAG", 3) == 0) {
         s_t.end = size - 128; /* ID3v1 */
     }
+    if (tag.cover_off + tag.cover_len > size) {
+        tag.cover_len = 0;
+    }
     if (s_t.start >= s_t.end) {
         track_close();
         return false;
@@ -432,9 +486,11 @@ static bool track_open(size_t index) {
     s_status.dur_s = s_t.dur_s;
     s_status.sample_rate = rate;
     s_status.bitrate_kbps = kbps;
+    s_status.cover_off = tag.cover_off;
+    s_status.cover_len = tag.cover_len;
     unlock();
-    serial_log("[audio] %s: %lu Hz, %lu kbps, %.0f s%s", path.c_str(), (unsigned long)rate, (unsigned long)kbps,
-               s_t.dur_s, s_t.has_toc ? " (VBR)" : "");
+    serial_log("[audio] %s: %lu Hz, %lu kbps, %.0f s%s%s", path.c_str(), (unsigned long)rate, (unsigned long)kbps,
+               s_t.dur_s, s_t.has_toc ? " (VBR)" : "", tag.cover_len ? ", cover" : "");
     return true;
 }
 
