@@ -10,6 +10,7 @@
 #include "breakout_ui.h"
 #include "clock_ui.h"
 #include "files_ui.h"
+#include "music_ui.h"
 #include "serial_log.h"
 #include "app_settings.h"
 #include "status_bar.h"
@@ -79,10 +80,10 @@ static void open_ambient(void) {
     (void)ambient_ui_open();
 }
 
-/* Home grid: 4 columns x 2 rows of 104 px cells (72 px tile + name) under the status bar. */
-static const lv_coord_t k_cell_w = 104;
-static const int k_grid_cols = 4;
-static const lv_coord_t k_grid_gap = 8;
+/* Home grid: 5 columns x 2 rows of 88 px cells (72 px tile + name) under the status bar - the full 464 px width. */
+static const lv_coord_t k_cell_w = 88;
+static const int k_grid_cols = 5;
+static const lv_coord_t k_grid_gap = 6;
 
 /** Rounded app tile: icon (large label) on top, app name below. Returns the icon label. */
 static lv_obj_t *add_app_tile(lv_obj_t *parent, const char *icon, const lv_font_t *icon_font, const char *name,
@@ -146,6 +147,8 @@ void home_ui_init(void) {
                                        lv_palette_main(LV_PALETTE_TEAL), weather_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_DIRECTORY, &lv_font_montserrat_30, "Files", lv_palette_main(LV_PALETTE_AMBER),
                        files_ui_open);
+    (void)add_app_tile(apps, LV_SYMBOL_AUDIO, &lv_font_montserrat_30, "Music", lv_palette_main(LV_PALETTE_PINK),
+                       music_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_PLAY, &lv_font_montserrat_28, "Breakout",
                        lv_palette_main(LV_PALETTE_DEEP_PURPLE), breakout_ui_open);
     lv_color_t air_color;
@@ -174,6 +177,7 @@ static void release_apps_cb(void *arg) {
     }
     weather_ui_release();
     files_ui_release();
+    music_ui_release();
     settings_ui_release();
     air_ui_release();
 }

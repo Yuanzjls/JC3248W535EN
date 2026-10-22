@@ -13,7 +13,9 @@
 #include <unistd.h>
 #include <vector>
 
+#include "audio_player.h"
 #include "media_ui.h"
+#include "music_ui.h"
 #include "serial_log.h"
 #include "platform_time.h"
 #include "status_bar.h"
@@ -239,6 +241,20 @@ static void row_cb(lv_event_t *e) {
         show_dir(join_path(s_cwd, entry.name));
     } else if (media_is_video(entry.name.c_str())) {
         media_ui_open_video(join_path(s_cwd, entry.name).c_str());
+    } else if (audio_is_mp3(entry.name.c_str())) {
+        /* Play the folder's MP3s from this one, in list order. */
+        std::vector<std::string> tracks;
+        size_t at = 0;
+        for (const Entry &x : s_entries) {
+            if (!x.dir && audio_is_mp3(x.name.c_str())) {
+                if (x.name == entry.name) {
+                    at = tracks.size();
+                }
+                tracks.push_back(join_path(s_cwd, x.name));
+            }
+        }
+        audio_play(tracks, at);
+        music_ui_open();
     } else if (media_is_image(entry.name.c_str())) {
         /* Pass the folder's images so the viewer can swipe through them. */
         std::vector<std::string> images;

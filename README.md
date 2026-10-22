@@ -4,7 +4,8 @@ Firmware for the Guition JC3248W535EN (a.k.a. "cheap black board"): ESP32-S3, 16
 8 MB octal PSRAM, 3.5" 480x320 QSPI display (AXS15231B) with capacitive touch, microSD slot.
 
 A small launcher with apps: Wi-Fi setup, Clock, Weather (Open-Meteo), Files (browser, image
-viewer, MJPEG video player), Breakout, Air (Airthings Wave radon sensor over BLE) and Settings.
+viewer, MJPEG video player), Music (MP3 player), Breakout, Air (Airthings Wave radon sensor over
+BLE) and Settings.
 UI with LVGL 8.3.
 
 ## Build
@@ -33,11 +34,18 @@ Everything persistent lives on the card (FAT), nothing in internal flash:
 |---|---|
 | `fonts/UI_FONT_16.bin` | UI font with CJK (copy from `documentation/fonts/`) |
 | `wifi_known.txt` | saved Wi-Fi networks (written by the Wi-Fi app) |
-| `settings.ini`, `timezone.ini` | brightness, units, clock format, timezone |
+| `settings.ini`, `timezone.ini` | brightness, units, clock format, speaker volume, timezone |
+| `music/` | MP3 files for the Music app (subfolders too) |
 | `weather.ini` | optional: `lat`, `lon`, `name`, `units` (otherwise IP geolocation) |
 | `airthings.ini` | chosen radon sensor (written by the Air app) |
 | `breakout.ini` | high score |
 | `.cache/mjpeg/` | video frame indexes (rebuilt if deleted) |
+
+Music: MP3 (MPEG-1/2/2.5, CBR or VBR), decoded with minimp3 (vendored in `src/minimp3/`); ID3
+title and artist are shown. Playback keeps
+going in the background; an `.mp3` opened in Files plays that folder. The speaker (2-pin
+"Speak" connector) is driven by the on-board NS4168 mono I2S amplifier (BCLK IO42, LRCLK IO2,
+DIN IO41), so stereo is mixed down to mono.
 
 Videos: raw MJPEG (`.mjpeg` / `.mjpg`), ideally 480x320; `_15fps` in the file name sets the rate
 (default 24).
