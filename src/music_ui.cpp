@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <lvgl.h>
 #include <algorithm>
 #include <string>
@@ -26,7 +27,9 @@
  * the background (cover_art.cpp) and shown when ready.
  *
  * The list is the player's playlist, or - before anything was played, or after Refresh - every
- * MP3 under /music (subfolders included). Tapping a track plays the list from there.
+ * MP3 under /music (subfolders included). Tapping a track plays the list from there; with shuffle
+ * on (top bar, saved in settings.ini) the rest follows in random order, and Play with nothing
+ * played yet starts at a random track.
  */
 
 static const char *k_library_dir = "/music";
@@ -336,7 +339,8 @@ static void play_cb(lv_event_t *e) {
     AudioStatus st;
     audio_get_status(&st);
     if (st.path.empty() && st.state == AudioState::Stopped && !s_tracks.empty()) {
-        audio_play(s_tracks, 0); /* nothing played yet: start the list */
+        /* Nothing played yet: start the list - at a random track when shuffling. */
+        audio_play(s_tracks, settings_get().shuffle ? esp_random() % s_tracks.size() : 0);
     } else {
         audio_toggle_pause();
     }
@@ -402,6 +406,18 @@ static void refresh_cb(lv_event_t *e) {
     load_library();
 }
 
+static void style_shuffle_btn(lv_obj_t *btn, bool on) {
+    lv_obj_set_style_bg_color(btn, on ? lv_palette_main(LV_PALETTE_PINK) : ui_color_track(), 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(btn, 0), on ? lv_color_white() : ui_color_text_muted(), 0);
+}
+
+static void shuffle_cb(lv_event_t *e) {
+    const bool on = !settings_get().shuffle;
+    settings_set_shuffle(on);
+    style_shuffle_btn(lv_event_get_target(e), on);
+    serial_log("[music] shuffle %s", on ? "on" : "off");
+}
+
 static lv_obj_t *add_ctrl_btn(lv_obj_t *parent, const char *symbol, lv_coord_t size, lv_event_cb_t cb) {
     lv_obj_t *btn = lv_btn_create(parent);
     lv_obj_set_size(btn, size, size);
@@ -460,6 +476,8 @@ static void build_screen(void) {
     lv_obj_clear_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *bar = status_bar_create(s_scr, "Music", true);
+    lv_obj_t *shuffle = status_bar_add_action(bar, LV_SYMBOL_SHUFFLE, shuffle_cb, nullptr);
+    style_shuffle_btn(shuffle, settings_get().shuffle);
     (void)status_bar_add_action(bar, LV_SYMBOL_REFRESH, refresh_cb, nullptr);
 
     lv_obj_t *body = add_plain_row(s_scr);

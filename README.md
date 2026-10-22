@@ -34,7 +34,7 @@ Everything persistent lives on the card (FAT), nothing in internal flash:
 |---|---|
 | `fonts/UI_FONT_16.bin` | UI font with CJK (copy from `documentation/fonts/`) |
 | `wifi_known.txt` | saved Wi-Fi networks (written by the Wi-Fi app) |
-| `settings.ini`, `timezone.ini` | brightness, units, clock format, speaker volume, timezone |
+| `settings.ini`, `timezone.ini` | brightness, units, clock format, speaker volume, shuffle, timezone |
 | `music/` | MP3 files for the Music app (subfolders too) |
 | `weather.ini` | optional: `lat`, `lon`, `name`, `units` (otherwise IP geolocation) |
 | `airthings.ini` | chosen radon sensor (written by the Air app) |

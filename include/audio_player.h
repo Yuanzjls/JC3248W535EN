@@ -47,5 +47,12 @@ void audio_seek(float fraction);
 /** Volume 0..100 (applies immediately; settings_set_volume() also saves it). */
 void audio_set_volume(int percent);
 
+/**
+ * Shuffle: play the playlist in a random order, each track once before any repeats (Next, Prev and
+ * the end of a track follow that order). Switching keeps the current track playing. Applies
+ * immediately; settings_set_shuffle() also saves it.
+ */
+void audio_set_shuffle(bool on);
+
 void audio_get_status(AudioStatus *out);
 std::vector<std::string> audio_playlist(void);

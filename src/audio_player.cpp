@@ -2,6 +2,7 @@
 
 #include <driver/i2s_std.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/idf_additions.h>
 #include <freertos/queue.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <utility>
 
 #include "app_settings.h"
 #include "minimp3/minimp3.h"
@@ -45,10 +47,10 @@ static const size_t k_pic_head = 256;           /* APIC bytes read to find where
 static const float k_restart_prev_s = 3.0f;     /* Prev restarts the track after this */
 static const int k_max_tries = 64;              /* decode calls without a frame before giving up */
 
-enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Stop, Seek };
+enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Stop, Seek, Shuffle };
 struct Command {
     Cmd cmd;
-    uint32_t arg; /* Play: index; Seek: permille */
+    uint32_t arg; /* Play: index; Seek: permille; Shuffle: on */
 };
 
 static QueueHandle_t s_cmd_q = nullptr;
@@ -56,6 +58,7 @@ static SemaphoreHandle_t s_lock = nullptr; /* s_playlist, s_status */
 static std::vector<std::string> s_playlist;
 static AudioStatus s_status;
 static volatile int s_gain_q15 = 0; /* volume as a Q15 gain */
+static volatile bool s_shuffle = false;
 
 /* ---------- task-only state ---------- */
 
@@ -585,20 +588,63 @@ static size_t playlist_size(void) {
     return n;
 }
 
-/**
- * Open the track at `index`, or the following ones if it fails. When `wrap` is false, stops after
- * the last track instead of starting over. Sets the state accordingly.
+/*
+ * Play order. Tracks are played by position in an order: the playlist itself, or (shuffle) a
+ * random permutation of it, so every track plays once before any repeats. s_pos is the current
+ * position; s_order_on says whether s_order is in use (task-side copy of s_shuffle, switched by
+ * Cmd::Play / Cmd::Shuffle so the order and the flag always change together).
  */
-static void start_from(size_t index, bool wrap) {
+static std::vector<size_t> s_order;
+static size_t s_pos = 0;
+static bool s_order_on = false;
+
+/** Playlist index played at order position p. */
+static size_t index_at(size_t p) {
+    return s_order_on && p < s_order.size() ? s_order[p] : p;
+}
+
+/** New random order of n tracks (Fisher-Yates); `first`, if < n, plays first. */
+static void shuffle_order(size_t n, size_t first) {
+    s_order.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        s_order[i] = i;
+    }
+    for (size_t i = n; i > 1; i--) {
+        std::swap(s_order[i - 1], s_order[esp_random() % i]);
+    }
+    for (size_t i = 0; i < n && first < n; i++) {
+        if (s_order[i] == first) {
+            std::swap(s_order[0], s_order[i]);
+            break;
+        }
+    }
+}
+
+/**
+ * Open the track at order position `pos`, or the following ones if it fails. At the end of the
+ * order: stop, or with `wrap` start over (with a fresh shuffle that doesn't repeat the track just
+ * played). Sets the state accordingly.
+ */
+static void start_at(size_t pos, bool wrap) {
     const size_t n = playlist_size();
-    for (size_t tried = 0; tried < n; tried++, index++) {
-        if (index >= n) {
+    for (size_t tried = 0; tried < n; tried++, pos++) {
+        if (pos >= n) {
             if (!wrap) {
                 break;
             }
-            index = 0;
+            pos = 0;
+            if (s_order_on) {
+                lock();
+                const size_t last = s_status.index;
+                unlock();
+                shuffle_order(n, n);
+                if (n > 1 && s_order[0] == last) {
+                    std::swap(s_order[0], s_order[1]);
+                }
+            }
         }
-        if (track_open(index)) {
+        if (track_open(index_at(pos))) {
+            s_pos = pos;
             set_state(AudioState::Playing);
             return;
         }
@@ -628,8 +674,21 @@ static void audio_task(void *arg) {
             const float pos = s_status.pos_s;
             unlock();
             switch (c.cmd) {
-            case Cmd::Play:
-                start_from(c.arg, true);
+            case Cmd::Play: /* new playlist: the chosen track first, then in (shuffled) order */
+                s_order_on = s_shuffle;
+                if (s_order_on) {
+                    shuffle_order(playlist_size(), c.arg);
+                }
+                start_at(s_order_on ? 0 : c.arg, true);
+                break;
+            case Cmd::Shuffle: /* keep the current track; reorder what comes after it */
+                s_order_on = c.arg != 0;
+                if (s_order_on) {
+                    shuffle_order(playlist_size(), index);
+                    s_pos = 0;
+                } else {
+                    s_pos = index;
+                }
                 break;
             case Cmd::Toggle:
                 if (st == AudioState::Playing) {
@@ -637,11 +696,11 @@ static void audio_task(void *arg) {
                 } else if (st == AudioState::Paused) {
                     set_state(AudioState::Playing);
                 } else {
-                    start_from(index, true);
+                    start_at(s_pos, true);
                 }
                 break;
             case Cmd::Next:
-                start_from(index + 1, true);
+                start_at(s_pos + 1, true);
                 break;
             case Cmd::Prev:
                 if (st != AudioState::Stopped && pos > k_restart_prev_s) {
@@ -649,7 +708,7 @@ static void audio_task(void *arg) {
                     set_state(AudioState::Playing);
                 } else {
                     const size_t n = playlist_size();
-                    start_from(index > 0 ? index - 1 : (n ? n - 1 : 0), true);
+                    start_at(s_pos > 0 ? s_pos - 1 : (n ? n - 1 : 0), true);
                 }
                 break;
             case Cmd::Stop:
@@ -670,17 +729,15 @@ static void audio_task(void *arg) {
         }
 
         if (!track_play_frame()) {
-            lock();
-            const size_t index = s_status.index;
-            unlock();
-            start_from(index + 1, false); /* end of the playlist: stop */
+            start_at(s_pos + 1, false); /* end of the order: stop */
         }
     }
 }
 
+static bool s_started = false;
+
 /** Create the queue, I2S channel, buffers and task on first use. */
 static bool ensure_started(void) {
-    static bool s_started = false;
     static bool s_failed = false;
     if (s_started || s_failed) {
         return s_started;
@@ -714,6 +771,7 @@ static void ensure_sync(void) {
         s_lock = xSemaphoreCreateMutex();
         s_cmd_q = xQueueCreate(8, sizeof(Command));
         audio_set_volume(settings_get().volume);
+        s_shuffle = settings_get().shuffle;
     }
 }
 
@@ -763,6 +821,14 @@ void audio_seek(float fraction) {
 void audio_set_volume(int percent) {
     percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
     s_gain_q15 = percent * percent * 32768 / 10000; /* squared: even steps to the ear */
+}
+
+void audio_set_shuffle(bool on) {
+    ensure_sync();
+    s_shuffle = on;
+    if (s_started) { /* otherwise the next Play picks it up */
+        send(Cmd::Shuffle, on ? 1 : 0);
+    }
 }
 
 void audio_get_status(AudioStatus *out) {

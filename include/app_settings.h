@@ -11,6 +11,7 @@ struct AppSettings {
     bool clock_24h;
     int ambient_min; /* ambient screen after this many idle minutes on Home; 0 = off */
     int volume;      /* speaker %, 0..100 */
+    bool shuffle;    /* Music: random order */
 };
 
 /** Read /settings.ini from SD (defaults if missing). Call after the SD card is mounted. */
@@ -22,6 +23,8 @@ const AppSettings &settings_get(void);
 void settings_set_brightness(int percent, bool save);
 /** Apply speaker volume now; save=true also writes /settings.ini (use false while dragging a slider). */
 void settings_set_volume(int percent, bool save);
+/** Music shuffle on/off: applies now and saves. */
+void settings_set_shuffle(bool on);
 /** Saves and triggers a weather re-fetch in the new units. */
 void settings_set_units(TempUnits units);
 void settings_set_clock_24h(bool on);

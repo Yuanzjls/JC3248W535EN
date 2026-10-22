@@ -18,12 +18,13 @@
  *   clock=24h         ; 24h | 12h
  *   ambient=3         ; idle minutes on Home before the ambient screen: 0 (off), 1, 3, 5, 10
  *   volume=50         ; speaker volume %, 0..100 (Music app)
+ *   shuffle=on        ; Music app plays in random order: on | off
  * Timezone is kept separately in /timezone.ini (timezone_ini.cpp).
  */
 static const char *k_path = "/settings.ini";
 static const int k_min_brightness = 10; /* never let the slider black out the screen */
 
-static AppSettings s_settings = {100, TempUnits::Auto, true, 3, 50};
+static AppSettings s_settings = {100, TempUnits::Auto, true, 3, 50, true};
 
 static const char *units_name(TempUnits u) {
     return u == TempUnits::Celsius ? "celsius" : u == TempUnits::Fahrenheit ? "fahrenheit" : "auto";
@@ -43,10 +44,10 @@ static int clamp_volume(int v) {
 }
 
 static void save(void) {
-    char text[180];
-    snprintf(text, sizeof(text), "[settings]\nbrightness=%d\nunits=%s\nclock=%s\nambient=%d\nvolume=%d\n",
+    char text[200];
+    snprintf(text, sizeof(text), "[settings]\nbrightness=%d\nunits=%s\nclock=%s\nambient=%d\nvolume=%d\nshuffle=%s\n",
              s_settings.brightness, units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h",
-             s_settings.ambient_min, s_settings.volume);
+             s_settings.ambient_min, s_settings.volume, s_settings.shuffle ? "on" : "off");
     if (!sd_write_text(k_path, text)) {
         serial_log("[settings] cannot write %s", k_path);
         return;
@@ -73,11 +74,13 @@ void settings_load(void) {
             s_settings.ambient_min = snap_ambient(atoi(val.c_str()));
         } else if (key == "volume") {
             s_settings.volume = clamp_volume(atoi(val.c_str()));
+        } else if (key == "shuffle") {
+            s_settings.shuffle = !str_ieq(val, "off");
         }
     });
-    serial_log("[settings] brightness=%d units=%s clock=%s ambient=%d min volume=%d", s_settings.brightness,
+    serial_log("[settings] brightness=%d units=%s clock=%s ambient=%d min volume=%d shuffle=%s", s_settings.brightness,
                units_name(s_settings.units), s_settings.clock_24h ? "24h" : "12h", s_settings.ambient_min,
-               s_settings.volume);
+               s_settings.volume, s_settings.shuffle ? "on" : "off");
 }
 
 const AppSettings &settings_get(void) {
@@ -98,6 +101,12 @@ void settings_set_volume(int percent, bool save_now) {
     if (save_now) {
         save();
     }
+}
+
+void settings_set_shuffle(bool on) {
+    s_settings.shuffle = on;
+    audio_set_shuffle(on);
+    save();
 }
 
 void settings_set_units(TempUnits units) {
