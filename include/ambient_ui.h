@@ -8,6 +8,3 @@
 
 /** Show it (LVGL context / under bsp_display_lock). False if it is still closing or out of memory. */
 bool ambient_ui_open(void);
-
-/** True while it is on screen (or still shutting down). */
-bool ambient_ui_busy(void);

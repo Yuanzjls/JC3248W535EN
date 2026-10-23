@@ -110,13 +110,6 @@ esp_err_t bsp_i2c_init(void)
     return ESP_OK;
 }
 
-esp_err_t bsp_i2c_deinit(void)
-{
-    BSP_ERROR_CHECK_RETURN_ERR(i2c_driver_delete(BSP_I2C_NUM));
-    i2c_initialized = false;
-    return ESP_OK;
-}
-
 // Bit number used to represent command and parameter
 #define LCD_LEDC_CH            1
 
@@ -161,16 +154,6 @@ esp_err_t bsp_display_brightness_set(int brightness_percent)
     BSP_ERROR_CHECK_RETURN_ERR(ledc_update_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CH));
 
     return ESP_OK;
-}
-
-esp_err_t bsp_display_backlight_off(void)
-{
-    return bsp_display_brightness_set(0);
-}
-
-esp_err_t bsp_display_backlight_on(void)
-{
-    return bsp_display_brightness_set(100);
 }
 
 static bool bsp_display_sync_cb(void *arg)
@@ -541,11 +524,6 @@ lv_disp_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
     BSP_NULL_CHECK(disp_indev = bsp_display_indev_init(cfg, disp), NULL);
 
     return disp;
-}
-
-lv_indev_t *bsp_display_get_input_dev(void)
-{
-    return disp_indev;
 }
 
 bool bsp_display_lock(uint32_t timeout_ms)

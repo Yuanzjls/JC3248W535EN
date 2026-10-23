@@ -28,28 +28,6 @@ static const char *TAG = "TP";
 * Public API functions
 *******************************************************************************/
 
-esp_err_t esp_lcd_touch_enter_sleep(esp_lcd_touch_handle_t tp)
-{
-    assert(tp != NULL);
-    if (tp->enter_sleep == NULL) {
-        ESP_LOGE(TAG, "Sleep mode not supported!");
-        return ESP_FAIL;
-    } else {
-        return tp->enter_sleep(tp);
-    }
-}
-
-esp_err_t esp_lcd_touch_exit_sleep(esp_lcd_touch_handle_t tp)
-{
-    assert(tp != NULL);
-    if (tp->exit_sleep == NULL) {
-        ESP_LOGE(TAG, "Sleep mode not supported!");
-        return ESP_FAIL;
-    } else {
-        return tp->exit_sleep(tp);
-    }
-}
-
 esp_err_t esp_lcd_touch_read_data(esp_lcd_touch_handle_t tp)
 {
     assert(tp != NULL);
@@ -123,93 +101,6 @@ esp_err_t esp_lcd_touch_get_button_state(esp_lcd_touch_handle_t tp, uint8_t n, u
     return ESP_OK;
 }
 #endif
-
-esp_err_t esp_lcd_touch_set_swap_xy(esp_lcd_touch_handle_t tp, bool swap)
-{
-    assert(tp != NULL);
-
-    tp->config.flags.swap_xy = swap;
-
-    /* Is swap supported by HW? */
-    if (tp->set_swap_xy) {
-        return tp->set_swap_xy(tp, swap);
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_lcd_touch_get_swap_xy(esp_lcd_touch_handle_t tp, bool *swap)
-{
-    assert(tp != NULL);
-    assert(swap != NULL);
-
-    /* Is swap supported by HW? */
-    if (tp->get_swap_xy) {
-        return tp->get_swap_xy(tp, swap);
-    } else {
-        *swap = tp->config.flags.swap_xy;
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_lcd_touch_set_mirror_x(esp_lcd_touch_handle_t tp, bool mirror)
-{
-    assert(tp != NULL);
-
-    tp->config.flags.mirror_x = mirror;
-
-    /* Is mirror supported by HW? */
-    if (tp->set_mirror_x) {
-        return tp->set_mirror_x(tp, mirror);
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_lcd_touch_get_mirror_x(esp_lcd_touch_handle_t tp, bool *mirror)
-{
-    assert(tp != NULL);
-    assert(mirror != NULL);
-
-    /* Is swap supported by HW? */
-    if (tp->get_mirror_x) {
-        return tp->get_mirror_x(tp, mirror);
-    } else {
-        *mirror = tp->config.flags.mirror_x;
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_lcd_touch_set_mirror_y(esp_lcd_touch_handle_t tp, bool mirror)
-{
-    assert(tp != NULL);
-
-    tp->config.flags.mirror_y = mirror;
-
-    /* Is mirror supported by HW? */
-    if (tp->set_mirror_y) {
-        return tp->set_mirror_y(tp, mirror);
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_lcd_touch_get_mirror_y(esp_lcd_touch_handle_t tp, bool *mirror)
-{
-    assert(tp != NULL);
-    assert(mirror != NULL);
-
-    /* Is swap supported by HW? */
-    if (tp->get_mirror_y) {
-        return tp->get_mirror_y(tp, mirror);
-    } else {
-        *mirror = tp->config.flags.mirror_y;
-    }
-
-    return ESP_OK;
-}
 
 esp_err_t esp_lcd_touch_del(esp_lcd_touch_handle_t tp)
 {

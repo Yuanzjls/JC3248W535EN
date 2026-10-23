@@ -49,7 +49,7 @@ static const float k_restart_prev_s = 3.0f;     /* Prev restarts the track after
 static const int k_max_tries = 64;              /* decode calls without a frame before giving up */
 static const uint32_t k_stream_wait_ms = 100;   /* stream: wait this long for data, then check commands */
 
-enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Stop, Seek, Shuffle, PlayStream };
+enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Seek, Shuffle, PlayStream };
 struct Command {
     Cmd cmd;
     uint32_t arg; /* Play: index; Seek: permille; Shuffle: on */
@@ -776,13 +776,6 @@ static void audio_task(void *arg) {
                     start_at(s_pos > 0 ? s_pos - 1 : (n ? n - 1 : 0), true);
                 }
                 break;
-            case Cmd::Stop:
-                track_close();
-                lock();
-                s_status.state = AudioState::Stopped;
-                s_status.pos_s = 0;
-                unlock();
-                break;
             case Cmd::Seek:
                 track_seek(c.arg / 1000.0f);
                 lock();
@@ -882,10 +875,6 @@ void audio_next(void) {
 
 void audio_prev(void) {
     send(Cmd::Prev);
-}
-
-void audio_stop(void) {
-    send(Cmd::Stop);
 }
 
 void audio_seek(float fraction) {

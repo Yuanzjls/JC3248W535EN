@@ -60,7 +60,3 @@ void time_sync_poll(void) {
                    (int)(ti.tm_mon + 1), (int)ti.tm_mday, (int)ti.tm_hour, (int)ti.tm_min, (int)ti.tm_sec);
     }
 }
-
-bool time_sync_is_synced(void) {
-    return s_synced;
-}

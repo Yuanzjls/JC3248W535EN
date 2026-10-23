@@ -311,72 +311,6 @@ esp_err_t esp_lcd_touch_get_button_state(esp_lcd_touch_handle_t tp, uint8_t n, u
 #endif
 
 /**
- * @brief Swap X and Y after read coordinates
- *
- * @param tp: Touch handler
- * @param swap: Set swap value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_set_swap_xy(esp_lcd_touch_handle_t tp, bool swap);
-
-/**
- * @brief Are X and Y coordinates swapped
- *
- * @param tp: Touch handler
- * @param swap: Get swap value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_get_swap_xy(esp_lcd_touch_handle_t tp, bool *swap);
-
-/**
- * @brief Mirror X after read coordinates
- *
- * @param tp: Touch handler
- * @param mirror: Set X mirror value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_set_mirror_x(esp_lcd_touch_handle_t tp, bool mirror);
-
-/**
- * @brief Is mirrored X
- *
- * @param tp: Touch handler
- * @param mirror: Get X mirror value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_get_mirror_x(esp_lcd_touch_handle_t tp, bool *mirror);
-
-/**
- * @brief Mirror Y after read coordinates
- *
- * @param tp: Touch handler
- * @param mirror: Set Y mirror value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_set_mirror_y(esp_lcd_touch_handle_t tp, bool mirror);
-
-/**
- * @brief Is mirrored Y
- *
- * @param tp: Touch handler
- * @param mirror: Get Y mirror value
- *
- * @return
- *      - ESP_OK on success
- */
-esp_err_t esp_lcd_touch_get_mirror_y(esp_lcd_touch_handle_t tp, bool *mirror);
-
-/**
  * @brief Delete touch (free all allocated memory and restart HW)
  *
  * @param tp: Touch handler
@@ -408,28 +342,6 @@ esp_err_t esp_lcd_touch_register_interrupt_callback(esp_lcd_touch_handle_t tp, e
  *      - ESP_OK on success
  */
 esp_err_t esp_lcd_touch_register_interrupt_callback_with_data(esp_lcd_touch_handle_t tp, esp_lcd_touch_interrupt_callback_t callback, void *user_data);
-
-/**
- * @brief Enter sleep mode
- *
- * @param tp: Touch handler
- *
- * @return
- *      - ESP_OK on success
- *      - ESP_ERR_INVALID_ARG if parameter is invalid
- */
-esp_err_t esp_lcd_touch_enter_sleep(esp_lcd_touch_handle_t tp);
-
-/**
- * @brief Exit sleep mode
- *
- * @param tp: Touch handler
- *
- * @return
- *      - ESP_OK on success
- *      - ESP_ERR_INVALID_ARG if parameter is invalid
- */
-esp_err_t esp_lcd_touch_exit_sleep(esp_lcd_touch_handle_t tp);
 
 #ifdef __cplusplus
 }

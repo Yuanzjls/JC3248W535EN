@@ -111,28 +111,6 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
  */
 esp_err_t bsp_display_brightness_set(int brightness_percent);
 
-/**
- * @brief Turn on display backlight
- *
- * Display must be already initialized by calling bsp_display_new()
- *
- * @return
- *      - ESP_OK                On success
- *      - ESP_ERR_INVALID_ARG   Parameter error
- */
-esp_err_t bsp_display_backlight_on(void);
-
-/**
- * @brief Turn off display backlight
- *
- * Display must be already initialized by calling bsp_display_new()
- *
- * @return
- *      - ESP_OK                On success
- *      - ESP_ERR_INVALID_ARG   Parameter error
- */
-esp_err_t bsp_display_backlight_off(void);
-
 #ifdef __cplusplus
 }
 #endif

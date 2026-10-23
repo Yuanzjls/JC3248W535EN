@@ -110,16 +110,6 @@ esp_err_t lvgl_port_deinit(void);
  */
 lv_disp_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg);
 
-/**
- * @brief Remove display handling from LVGL
- *
- * @note Free all memory used for this display.
- *
- * @return
- *      - ESP_OK                    on success
- */
-esp_err_t lvgl_port_remove_disp(lv_disp_t *disp);
-
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
 /**
  * @brief Add LCD touch as an input device
@@ -131,15 +121,6 @@ esp_err_t lvgl_port_remove_disp(lv_disp_t *disp);
  */
 lv_indev_t *lvgl_port_add_touch(const lvgl_port_touch_cfg_t *touch_cfg);
 
-/**
- * @brief Remove selected LCD touch from input devices
- *
- * @note Free all memory used for this display.
- *
- * @return
- *      - ESP_OK                    on success
- */
-esp_err_t lvgl_port_remove_touch(lv_indev_t *touch);
 #endif
 
 /**

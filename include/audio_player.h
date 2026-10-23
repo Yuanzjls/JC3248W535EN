@@ -54,7 +54,6 @@ void audio_toggle_pause(void);
 void audio_next(void);
 /** Previous track, or back to the start if more than a few seconds in. */
 void audio_prev(void);
-void audio_stop(void);
 /** Jump to a fraction (0..1) of the current track. */
 void audio_seek(float fraction);
 

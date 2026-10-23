@@ -140,30 +140,6 @@ err:
     return ret;
 }
 
-esp_err_t lvgl_port_resume(void)
-{
-    esp_err_t ret = ESP_ERR_INVALID_STATE;
-
-    if (lvgl_port_ctx.tick_timer != NULL) {
-        lv_timer_enable(true);
-        ret = esp_timer_start_periodic(lvgl_port_ctx.tick_timer, lvgl_port_timer_period_ms * 1000);
-    }
-
-    return ret;
-}
-
-esp_err_t lvgl_port_stop(void)
-{
-    esp_err_t ret = ESP_ERR_INVALID_STATE;
-
-    if (lvgl_port_ctx.tick_timer != NULL) {
-        lv_timer_enable(false);
-        ret = esp_timer_stop(lvgl_port_ctx.tick_timer);
-    }
-
-    return ret;
-}
-
 esp_err_t lvgl_port_deinit(void)
 {
     /* Stop and delete timer */
@@ -286,35 +262,6 @@ err:
     return disp;
 }
 
-esp_err_t lvgl_port_remove_disp(lv_disp_t *disp)
-{
-    assert(disp);
-    lv_disp_drv_t *disp_drv = disp->driver;
-    assert(disp_drv);
-    lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)disp_drv->user_data;
-
-    lv_disp_remove(disp);
-
-    if (disp_drv) {
-        if (disp_drv->draw_buf && disp_drv->draw_buf->buf1) {
-            free(disp_drv->draw_buf->buf1);
-            disp_drv->draw_buf->buf1 = NULL;
-        }
-        if (disp_drv->draw_buf && disp_drv->draw_buf->buf2) {
-            free(disp_drv->draw_buf->buf2);
-            disp_drv->draw_buf->buf2 = NULL;
-        }
-        if (disp_drv->draw_buf) {
-            free(disp_drv->draw_buf);
-            disp_drv->draw_buf = NULL;
-        }
-    }
-
-    free(disp_ctx);
-
-    return ESP_OK;
-}
-
 #ifdef ESP_LVGL_PORT_TOUCH_COMPONENT
 lv_indev_t *lvgl_port_add_touch(const lvgl_port_touch_cfg_t *touch_cfg)
 {
@@ -340,22 +287,6 @@ lv_indev_t *lvgl_port_add_touch(const lvgl_port_touch_cfg_t *touch_cfg)
     return lv_indev_drv_register(&touch_ctx->indev_drv);
 }
 
-esp_err_t lvgl_port_remove_touch(lv_indev_t *touch)
-{
-    assert(touch);
-    lv_indev_drv_t *indev_drv = touch->driver;
-    assert(indev_drv);
-    lvgl_port_touch_ctx_t *touch_ctx = (lvgl_port_touch_ctx_t *)indev_drv->user_data;
-
-    /* Remove input device driver */
-    lv_indev_delete(touch);
-
-    if (touch_ctx) {
-        free(touch_ctx);
-    }
-
-    return ESP_OK;
-}
 #endif
 
 bool lvgl_port_lock(uint32_t timeout_ms)
@@ -370,13 +301,6 @@ void lvgl_port_unlock(void)
 {
     assert(lvgl_port_ctx.lvgl_mux && "lvgl_port_init must be called first");
     xSemaphoreGiveRecursive(lvgl_port_ctx.lvgl_mux);
-}
-
-void lvgl_port_flush_ready(lv_disp_t *disp)
-{
-    assert(disp);
-    assert(disp->driver);
-    lv_disp_flush_ready(disp->driver);
 }
 
 /*******************************************************************************

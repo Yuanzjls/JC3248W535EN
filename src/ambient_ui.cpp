@@ -598,7 +598,3 @@ bool ambient_ui_open(void) {
     serial_log("[ambient] opened");
     return true;
 }
-
-bool ambient_ui_busy(void) {
-    return s_state != State::Idle;
-}
