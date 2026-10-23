@@ -1653,9 +1653,11 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=200
 # CONFIG_MBEDTLS_ECP_RESTARTABLE is not set
 CONFIG_MBEDTLS_CMAC_C=y
-CONFIG_MBEDTLS_HARDWARE_AES=y
-CONFIG_MBEDTLS_AES_USE_INTERRUPT=y
-CONFIG_MBEDTLS_AES_INTERRUPT_LEVEL=0
+# Software AES: TLS buffers are in PSRAM (MBEDTLS_EXTERNAL_MEM_ALLOC), which the AES DMA can't use,
+# so hardware AES allocated an internal bounce buffer for every record. With BLE, Wi-Fi and audio
+# in internal RAM that failed ("esp-aes: Failed to allocate memory") and HTTPS radio dropped every
+# few seconds. Software AES easily keeps up with audio streams and lyrics downloads.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
 CONFIG_MBEDTLS_GCM_SUPPORT_NON_AES_CIPHER=y
 CONFIG_MBEDTLS_HARDWARE_MPI=y
 # CONFIG_MBEDTLS_LARGE_KEY_SOFTWARE_MPI is not set
