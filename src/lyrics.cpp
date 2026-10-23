@@ -1,6 +1,6 @@
 #include "lyrics.h"
 
-#include <ArduinoJson.h>
+#include "psram_json.h"
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
@@ -52,21 +52,6 @@ static TaskHandle_t s_task = nullptr;
 static Request s_req;
 static bool s_req_new = false;
 static LyricsResult *s_done = nullptr;
-
-/* Same as weather.cpp: ArduinoJson nodes and strings in PSRAM. */
-struct PsramJsonAllocator : ArduinoJson::Allocator {
-    void *allocate(size_t n) override {
-        return heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    void deallocate(void *p) override {
-        heap_caps_free(p);
-    }
-    void *reallocate(void *p, size_t n) override {
-        return heap_caps_realloc_prefer(p, n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-};
-static PsramJsonAllocator s_json_alloc;
 
 /* ---------- helpers ---------- */
 
@@ -384,7 +369,7 @@ static Fetch fetch_exact(const Request &q, const std::string &title, const std::
     }
     JsonDocument filter;
     fill_filter(filter.to<JsonObject>());
-    JsonDocument doc(&s_json_alloc);
+    JsonDocument doc(&g_psram_json);
     const DeserializationError jerr = deserializeJson(doc, body, DeserializationOption::Filter(filter));
     if (jerr) {
         serial_log("[lyrics] get: JSON error %s (%u bytes)", jerr.c_str(), (unsigned)body.size());
@@ -403,7 +388,7 @@ static Fetch fetch_search(const Request &q, const std::string &query, Record *ou
     }
     JsonDocument filter;
     fill_filter(filter[0]);
-    JsonDocument doc(&s_json_alloc);
+    JsonDocument doc(&g_psram_json);
     body.shrink_to_fit();
     const DeserializationError jerr = deserializeJson(doc, body, DeserializationOption::Filter(filter));
     if (jerr) {
