@@ -20,7 +20,11 @@ pio device monitor # logs (115200, USB Serial/JTAG)
 
 On Windows run PlatformIO from PowerShell or cmd: the ESP-IDF build refuses Git Bash / MSYS.
 
-- Configuration: `sdkconfig.defaults` (the generated `sdkconfig.JC3248W535EN` is not versioned).
+- Configuration: `sdkconfig.defaults` - only the options that differ from ESP-IDF's defaults. The
+  build expands it into the full `sdkconfig.JC3248W535EN` (generated, not versioned); delete that
+  file after editing `sdkconfig.defaults` so the change is picked up.
+- Components: only those `src/CMakeLists.txt` requires are built (`COMPONENTS` in the top-level
+  `CMakeLists.txt`); add a component there when the code starts using one.
 - ESP-IDF components (`esp-nimble-cpp`, `esp_new_jpeg`): `src/idf_component.yml`, fetched into
   `managed_components/` on the first build.
 - Libraries (LVGL, ArduinoJson, JPEGDEC, PNGdec): `lib_deps` in `platformio.ini`.
