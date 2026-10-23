@@ -4,8 +4,8 @@ Firmware for the Guition JC3248W535EN (a.k.a. "cheap black board"): ESP32-S3, 16
 8 MB octal PSRAM, 3.5" 480x320 QSPI display (AXS15231B) with capacitive touch, microSD slot.
 
 A small launcher with apps: Wi-Fi setup, Clock, Weather (Open-Meteo), Files (browser, image
-viewer, MJPEG video player), Music (MP3 player), Breakout, Air (Airthings Wave radon sensor over
-BLE) and Settings.
+viewer, MJPEG video player), Music (MP3 player with lyrics), Radio (internet radio), Breakout, Air
+(Airthings Wave radon sensor over BLE) and Settings.
 UI with LVGL 8.3.
 
 ## Build
@@ -36,6 +36,8 @@ Everything persistent lives on the card (FAT), nothing in internal flash:
 | `wifi_known.txt` | saved Wi-Fi networks (written by the Wi-Fi app) |
 | `settings.ini`, `timezone.ini` | brightness, units, clock format, speaker volume, shuffle, timezone |
 | `music/` | MP3 files for the Music app (subfolders too) |
+| `radio.txt` | saved radio stations, one per line: `<stream URL> <name>` (written by the Radio app) |
+| `radio_last.txt` | last radio station played |
 | `weather.ini` | optional: `lat`, `lon`, `name`, `units` (otherwise IP geolocation) |
 | `airthings.ini` | chosen radon sensor (written by the Air app) |
 | `breakout.ini` | high score |
@@ -52,6 +54,12 @@ Lyrics: a `<song>.lrc` next to the MP3 is used as is (UTF-8; line-synced, word-s
 title, artist and duration (needs Wi-Fi) and saved as `<song>.lrc`; songs with no match are
 remembered in `.cache/lyrics/`. Title and artist come from the ID3 tag, else from an
 "Artist - Title" file name - use the names LRCLIB knows (e.g. the original-language title).
+
+Radio: MP3 internet radio over HTTP / HTTPS (AAC and HLS streams aren't supported). Stations come
+from `radio.txt` (Saved) or the [Radio Browser](https://www.radio-browser.info) directory: Local
+(the most played stations in your country, by IP address) and Top (worldwide). Playback starts
+after ~2 s of buffering, shows the station's "now playing" title (ICY metadata) and reconnects
+after drops.
 
 At high volume on a PC's USB port, the amplifier can pull the 5 V supply down far enough that
 the board drops off USB and restarts (reset reason "USB reset", no panic). Use a charger or the

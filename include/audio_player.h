@@ -28,6 +28,12 @@ struct AudioStatus {
     uint32_t cover_len = 0; /* 0 = none */
     bool error = false; /* last track could not be opened / decoded */
     uint32_t seq = 0;   /* bumped once a track's details (title, cover, duration) are complete, or it failed */
+
+    /* Internet radio (audio_play_stream): path is the URL, title the station name, no duration. */
+    bool stream = false;
+    std::string now_playing; /* the station's "StreamTitle" (song), may be empty */
+    std::string stream_note; /* "Connecting...", "Buffering...", an error; empty while playing */
+    int buffer_pct = 0;      /* network buffer fill */
 };
 
 /** True for names the player can play (.mp3). */
@@ -35,6 +41,13 @@ bool audio_is_mp3(const char *name);
 
 /** Play `playlist` (card paths) starting at `index`; replaces the current playlist. */
 void audio_play(const std::vector<std::string> &playlist, size_t index);
+
+/**
+ * Play an internet radio station (HTTP / HTTPS MP3 stream; `name` is shown as the title). Replaces
+ * the current track; the playlist is kept for the Music screen. Next / Prev / seek do nothing while
+ * a station plays, and pause stops the stream (Play reconnects - it's live).
+ */
+void audio_play_stream(const std::string &url, const std::string &name);
 
 /** Pause / resume (starts the current track again if stopped). */
 void audio_toggle_pause(void);

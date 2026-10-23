@@ -21,6 +21,7 @@
 #include "status_bar.h"
 #include "ui_font.h"
 #include "ui_theme.h"
+#include "volume_ui.h"
 
 /*
  * Music player: now-playing card (cover, title, artist, seek bar, prev / play / next, volume) next
@@ -54,8 +55,7 @@ static lv_obj_t *s_seek = nullptr;
 static lv_obj_t *s_pos_lbl = nullptr;
 static lv_obj_t *s_dur_lbl = nullptr;
 static lv_obj_t *s_play_lbl = nullptr;
-static lv_obj_t *s_vol = nullptr;
-static lv_obj_t *s_vol_lbl = nullptr;
+static lv_obj_t *s_vol_row = nullptr;
 static lv_timer_t *s_timer = nullptr;
 
 static std::vector<std::string> s_tracks; /* card paths shown in the list */
@@ -437,6 +437,10 @@ static void lyrics_show(LyricsResult *r) {
 /** New track (or Search again): ask for its lyrics. */
 static void lyrics_load(const AudioStatus &st, bool retry) {
     s_lyr_id++;
+    if (st.stream) {
+        lyrics_note("No lyrics for internet radio", false);
+        return;
+    }
     if (st.path.empty() || st.error) {
         lyrics_note("Lyrics appear here when a song plays", false);
         return;
@@ -649,37 +653,6 @@ static void seek_cb(lv_event_t *e) {
     lv_label_set_text(s_pos_lbl, buf);
 }
 
-static void volume_cb(lv_event_t *e) {
-    const int v = lv_slider_get_value(s_vol);
-    const bool released = lv_event_get_code(e) == LV_EVENT_RELEASED;
-    lv_label_set_text_fmt(s_vol_lbl, "%d%%", v);
-    settings_set_volume(v, released);
-    if (released) {
-        serial_log("[music] volume %d%%", v);
-    }
-}
-
-/*
- * The volume row sits at the bottom of the screen, and presses there tend to land just below it
- * (the log showed them at y = 308, under the row). Accept any press from the top of the row down to
- * the screen edge, across the slider's width. lv_obj_hit_test() checks the extended click area
- * first and the HIT_TEST event can only narrow it, so the click area is made generous and trimmed
- * here; the containers above the slider are OVERFLOW_VISIBLE so the search reaches it at all.
- */
-static const lv_coord_t k_vol_ext_click = 40;
-
-static void volume_hit_test_cb(lv_event_t *e) {
-    lv_hit_test_info_t *info = (lv_hit_test_info_t *)lv_event_get_param(e);
-    lv_area_t a, row;
-    lv_obj_get_coords(s_vol, &a);
-    lv_obj_get_coords(lv_obj_get_parent(s_vol), &row);
-    a.x1 -= 12;
-    a.x2 += 12;
-    a.y1 = row.y1;
-    a.y2 = LV_VER_RES - 1;
-    info->res = _lv_area_is_point_on(&a, info->point, 0);
-}
-
 static void refresh_cb(lv_event_t *e) {
     LV_UNUSED(e);
     load_library();
@@ -832,27 +805,7 @@ static void build_screen(void) {
     s_play_lbl = lv_obj_get_child(play, 0);
     (void)add_ctrl_btn(ctrl_row, LV_SYMBOL_NEXT, 44, next_cb);
 
-    /* (vol) [====volume====] 50% */
-    lv_obj_t *vol_row = add_slider_row(card, &s_vol);
-    lv_obj_set_style_pad_hor(vol_row, 4, 0);
-    lv_obj_t *vol_icon = lv_label_create(vol_row);
-    lv_obj_set_style_text_color(vol_icon, ui_color_text_muted(), 0);
-    lv_label_set_text(vol_icon, LV_SYMBOL_VOLUME_MID);
-    lv_obj_move_to_index(vol_icon, 0);
-    s_vol_lbl = add_small_label(vol_row);
-    lv_obj_set_width(s_vol_lbl, 32);
-    lv_obj_set_style_text_align(s_vol_lbl, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_slider_set_range(s_vol, 0, 100);
-    lv_slider_set_value(s_vol, settings_get().volume, LV_ANIM_OFF);
-    lv_label_set_text_fmt(s_vol_lbl, "%d%%", settings_get().volume);
-    lv_obj_add_event_cb(s_vol, volume_cb, LV_EVENT_VALUE_CHANGED, nullptr);
-    lv_obj_add_event_cb(s_vol, volume_cb, LV_EVENT_RELEASED, nullptr);
-    lv_obj_set_ext_click_area(s_vol, k_vol_ext_click);
-    lv_obj_add_flag(s_vol, LV_OBJ_FLAG_ADV_HITTEST);
-    lv_obj_add_event_cb(s_vol, volume_hit_test_cb, LV_EVENT_HIT_TEST, nullptr);
-    lv_obj_add_flag(vol_row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-    lv_obj_add_flag(body, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    s_vol_row = volume_ui_create(card);
 
     /* Right side: [Lyrics | Tracks] over the lyrics card or the track list */
     lv_obj_t *right = lv_obj_create(body);
@@ -909,6 +862,7 @@ void music_ui_open(void) {
         s_view = playlist.empty() ? 1 : 0; /* first time: pick songs, or watch the lyrics */
     }
     show_view(s_view);
+    volume_ui_sync(s_vol_row); /* may have changed in Radio */
     lv_scr_load(s_scr);
     refresh();
 }
@@ -926,7 +880,7 @@ void music_ui_release(void) {
     lv_obj_del(s_scr);
     s_view_bm = s_lyr = nullptr;
     s_scr = s_list = s_cover_img = s_cover_icon = s_title = s_artist = s_info = nullptr;
-    s_seek = s_pos_lbl = s_dur_lbl = s_play_lbl = s_vol = s_vol_lbl = nullptr;
+    s_seek = s_pos_lbl = s_dur_lbl = s_play_lbl = s_vol_row = nullptr;
     s_timer = nullptr;
     s_tracks.clear();
     s_tracks.shrink_to_fit();

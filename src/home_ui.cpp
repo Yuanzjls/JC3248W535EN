@@ -11,6 +11,7 @@
 #include "clock_ui.h"
 #include "files_ui.h"
 #include "music_ui.h"
+#include "radio_ui.h"
 #include "serial_log.h"
 #include "app_settings.h"
 #include "status_bar.h"
@@ -149,6 +150,8 @@ void home_ui_init(void) {
                        files_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_AUDIO, &lv_font_montserrat_30, "Music", lv_palette_main(LV_PALETTE_PINK),
                        music_ui_open);
+    (void)add_app_tile(apps, LV_SYMBOL_VOLUME_MAX, &lv_font_montserrat_30, "Radio",
+                       lv_palette_main(LV_PALETTE_INDIGO), radio_ui_open);
     (void)add_app_tile(apps, LV_SYMBOL_PLAY, &lv_font_montserrat_28, "Breakout",
                        lv_palette_main(LV_PALETTE_DEEP_PURPLE), breakout_ui_open);
     lv_color_t air_color;
@@ -178,6 +181,7 @@ static void release_apps_cb(void *arg) {
     weather_ui_release();
     files_ui_release();
     music_ui_release();
+    radio_ui_release();
     settings_ui_release();
     air_ui_release();
 }

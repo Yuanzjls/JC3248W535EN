@@ -15,6 +15,7 @@
 
 #include "app_settings.h"
 #include "minimp3/minimp3.h"
+#include "net_stream.h"
 #include "sd_card.h"
 #include "serial_log.h"
 
@@ -46,8 +47,9 @@ static const uint32_t k_max_text = 1024;        /* longest ID3 title / artist fr
 static const size_t k_pic_head = 256;           /* APIC bytes read to find where the picture starts */
 static const float k_restart_prev_s = 3.0f;     /* Prev restarts the track after this */
 static const int k_max_tries = 64;              /* decode calls without a frame before giving up */
+static const uint32_t k_stream_wait_ms = 100;   /* stream: wait this long for data, then check commands */
 
-enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Stop, Seek, Shuffle };
+enum class Cmd : uint8_t { Play, Toggle, Next, Prev, Stop, Seek, Shuffle, PlayStream };
 struct Command {
     Cmd cmd;
     uint32_t arg; /* Play: index; Seek: permille; Shuffle: on */
@@ -56,6 +58,7 @@ struct Command {
 static QueueHandle_t s_cmd_q = nullptr;
 static SemaphoreHandle_t s_lock = nullptr; /* s_playlist, s_status */
 static std::vector<std::string> s_playlist;
+static std::string s_stream_url, s_stream_name; /* station for Cmd::PlayStream */
 static AudioStatus s_status;
 static volatile int s_gain_q15 = 0; /* volume as a Q15 gain */
 static volatile bool s_shuffle = false;
@@ -67,6 +70,7 @@ static uint32_t s_i2s_rate = 44100;
 static mp3dec_t *s_dec = nullptr; /* PSRAM */
 
 struct Track {
+    bool stream = false;         /* internet radio (net_stream.cpp) instead of a file */
     int fd = -1;
     uint32_t start = 0, end = 0; /* audio bytes [start, end) - after ID3v2, before ID3v1 */
     uint32_t pos = 0;            /* next file offset to read */
@@ -357,17 +361,28 @@ static void track_close(void) {
     if (s_t.fd >= 0) {
         close(s_t.fd);
     }
+    if (s_t.stream) {
+        stream_close();
+    }
     uint8_t *buf = s_t.buf;
     s_t = Track();
     s_t.buf = buf;
 }
 
-/** Move unread data to the front and read more. False if nothing more could be read. */
+/**
+ * Move unread data to the front and read more. False if nothing more could be read (end of file;
+ * for a stream: nothing buffered within a short wait).
+ */
 static bool track_refill(void) {
     if (s_t.left > 0 && s_t.ptr != s_t.buf) {
         memmove(s_t.buf, s_t.ptr, s_t.left);
     }
     s_t.ptr = s_t.buf;
+    if (s_t.stream) {
+        const size_t got = stream_read(s_t.buf + s_t.left, k_in_buf - s_t.left, k_stream_wait_ms);
+        s_t.left += got;
+        return got > 0;
+    }
     size_t want = k_in_buf - s_t.left;
     if (want > s_t.end - s_t.pos) {
         want = s_t.end - s_t.pos;
@@ -442,6 +457,7 @@ static bool track_open(size_t index) {
     if (index < s_playlist.size()) {
         path = s_playlist[index];
     }
+    s_status.stream = false;
     s_status.index = index;
     s_status.count = s_playlist.size();
     s_status.path = path;
@@ -519,20 +535,27 @@ static void track_seek(float fraction) {
     s_t.samples = 0;
 }
 
-/** Decode one frame and play it. False at the end of the track (or on unreadable data). */
-static bool track_play_frame(void) {
+enum class Frame { Played, Wait, End };
+
+/** Out of data: a file has ended; a stream is (re)buffering - unless it gave up. */
+static Frame out_of_data(void) {
+    return s_t.stream && !stream_failed() ? Frame::Wait : Frame::End;
+}
+
+/** Decode one frame and play it. End at the end of the track (or on unreadable data). */
+static Frame track_play_frame(void) {
     for (int tries = 0; tries < k_max_tries; tries++) {
         if (s_t.left < k_refill_at) {
             (void)track_refill();
         }
         if (s_t.left <= 0) {
-            return false;
+            return out_of_data();
         }
         mp3dec_frame_info_t info = {};
         const int n = mp3dec_decode_frame(s_dec, s_t.ptr, s_t.left, s_pcm, &info);
         if (info.frame_bytes == 0) { /* the buffer ends inside a frame */
             if (!track_refill()) {
-                return false; /* truncated last frame */
+                return s_t.stream ? out_of_data() : Frame::End; /* truncated last frame */
             }
             continue;
         }
@@ -568,10 +591,36 @@ static bool track_play_frame(void) {
             s_status.bitrate_kbps = info.bitrate_kbps;
         }
         unlock();
-        return true;
+        return Frame::Played;
+    }
+    if (s_t.stream) {
+        return out_of_data(); /* junk in the stream: keep reading */
     }
     serial_log("[audio] no MP3 data found, skipping track");
-    return false;
+    return Frame::End;
+}
+
+/** Start the internet radio station set by audio_play_stream(). */
+static void stream_start(void) {
+    track_close();
+    lock();
+    const std::string url = s_stream_url;
+    s_status.stream = true;
+    s_status.path = url;
+    s_status.title = s_stream_name;
+    s_status.artist.clear();
+    s_status.pos_s = s_status.dur_s = 0;
+    s_status.sample_rate = s_status.bitrate_kbps = 0;
+    s_status.cover_off = s_status.cover_len = 0;
+    s_status.error = false;
+    s_status.stream_note.clear();
+    s_status.state = AudioState::Playing;
+    s_status.seq++;
+    unlock();
+    s_t.stream = true;
+    s_t.ptr = s_t.buf;
+    mp3dec_init(s_dec);
+    stream_open(url);
 }
 
 /* ---------- task ---------- */
@@ -674,6 +723,7 @@ static void audio_task(void *arg) {
             lock();
             const size_t index = s_status.index;
             const float pos = s_status.pos_s;
+            const bool is_stream = s_status.stream;
             unlock();
             switch (c.cmd) {
             case Cmd::Play: /* new playlist: the chosen track first, then in (shuffled) order */
@@ -692,8 +742,16 @@ static void audio_task(void *arg) {
                     s_pos = index;
                 }
                 break;
+            case Cmd::PlayStream:
+                stream_start();
+                break;
             case Cmd::Toggle:
-                if (st == AudioState::Playing) {
+                if (is_stream && st == AudioState::Playing) { /* live: stop, and reconnect on Play */
+                    track_close();
+                    set_state(AudioState::Stopped);
+                } else if (is_stream && st == AudioState::Stopped) {
+                    stream_start();
+                } else if (st == AudioState::Playing) {
                     set_state(AudioState::Paused);
                 } else if (st == AudioState::Paused) {
                     set_state(AudioState::Playing);
@@ -702,9 +760,14 @@ static void audio_task(void *arg) {
                 }
                 break;
             case Cmd::Next:
-                start_at(s_pos + 1, true);
+                if (!is_stream) { /* stations are switched by the Radio screen */
+                    start_at(s_pos + 1, true);
+                }
                 break;
             case Cmd::Prev:
+                if (is_stream) {
+                    break;
+                }
                 if (st != AudioState::Stopped && pos > k_restart_prev_s) {
                     track_seek(0);
                     set_state(AudioState::Playing);
@@ -730,7 +793,17 @@ static void audio_task(void *arg) {
             continue; /* drain further commands before decoding */
         }
 
-        if (!track_play_frame()) {
+        const Frame f = track_play_frame();
+        if (f == Frame::End && s_t.stream) { /* the station gave up: keep the reason */
+            StreamInfo si;
+            stream_get_info(&si);
+            track_close();
+            lock();
+            s_status.state = AudioState::Stopped;
+            s_status.error = true;
+            s_status.stream_note = si.error.empty() ? "Station not reachable" : si.error;
+            unlock();
+        } else if (f == Frame::End) {
             start_at(s_pos + 1, false); /* end of the order: stop */
         }
     }
@@ -833,11 +906,34 @@ void audio_set_shuffle(bool on) {
     }
 }
 
+void audio_play_stream(const std::string &url, const std::string &name) {
+    if (url.empty()) {
+        return;
+    }
+    ensure_sync();
+    lock();
+    s_stream_url = url;
+    s_stream_name = name;
+    unlock();
+    send(Cmd::PlayStream);
+}
+
 void audio_get_status(AudioStatus *out) {
     ensure_sync();
     lock();
     *out = s_status;
     unlock();
+    if (out->stream && out->state == AudioState::Playing) {
+        StreamInfo si;
+        stream_get_info(&si);
+        out->now_playing = si.now_playing;
+        out->buffer_pct = si.buffer_pct;
+        out->stream_note = si.state == StreamState::Connecting  ? "Connecting..."
+                           : si.state == StreamState::Buffering ? "Buffering..."
+                           : si.state == StreamState::Retrying  ? si.error
+                           : si.state == StreamState::Failed    ? si.error
+                                                                : "";
+    }
 }
 
 std::vector<std::string> audio_playlist(void) {
