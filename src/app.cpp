@@ -21,6 +21,7 @@
 #include "app_settings.h"
 #include "airthings.h"
 #include "sysmon.h"
+#include "ota_update.h"
 #include <esp_debug_helpers.h>
 
 
@@ -106,6 +107,7 @@ static void setup(void)
   serial_log_init();
   serial_log("[app] boot: starting (reset reason %d: %s)", (int)esp_reset_reason(), reset_reason_str(esp_reset_reason()));
 
+  ota_boot(); /* firmware version; confirms a freshly updated firmware after a minute */
   BOOT_STEP("SD mount", (void)sd_card_mount());
   BOOT_STEP("wifi_store_begin (read SD)", wifi_store_begin());
   BOOT_STEP("clock_ui_init (read TZ)", clock_ui_init());

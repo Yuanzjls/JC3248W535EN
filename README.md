@@ -20,6 +20,15 @@ pio device monitor # logs (115200, USB Serial/JTAG)
 
 On Windows run PlatformIO from PowerShell or cmd: the ESP-IDF build refuses Git Bash / MSYS.
 
+Over-the-air update: once the board runs a firmware with OTA support (flash it over USB once),
+open its web page (`http://<board-IP>/`, shown in Settings) and use **Firmware > Update
+firmware...** with `.pio/build/JC3248W535EN/firmware.bin`. The image goes to the spare app slot
+(`app0` / `app1`), is verified, and the board restarts into it. A new firmware confirms itself
+after a minute of normal running; if it crashes or resets before then, the bootloader goes back
+to the previous one. Only firmware built for this project is accepted. The web page has no
+login - anyone on your network could update the board, as they can already use the file manager.
+The firmware version shown (web page, Settings > About) is `git describe` at build time.
+
 - Configuration: `sdkconfig.defaults` - only the options that differ from ESP-IDF's defaults. The
   build expands it into the full `sdkconfig.JC3248W535EN` (generated, not versioned); delete that
   file after editing `sdkconfig.defaults` so the change is picked up.

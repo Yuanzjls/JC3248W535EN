@@ -10,6 +10,8 @@ file(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.c ${CMAKE_SOURCE_DIR}/sr
 idf_component_register(SRCS ${app_sources}
                        INCLUDE_DIRS "." "../include"
                        REQUIRES
+                           app_update                  # OTA slots and rollback (ota_update)
+                           bootloader_support          # image header check (ota_update)
                            bt                          # BLE controller + NimBLE host (Air)
                            driver                      # legacy I2C driver (touch, esp_bsp.c)
                            esp_driver_gpio

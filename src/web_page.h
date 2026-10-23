@@ -155,6 +155,23 @@ footer { color:var(--muted); font-size:12px; text-align:center; margin:8px 0 20p
   <div class="k" id="space" style="margin-top:10px"></div>
 </section>
 
+<section>
+  <h2>Firmware</h2>
+  <div id="fw_info">-</div>
+  <div class="tools">
+    <button id="btn_fw">Update firmware...</button>
+    <span class="msg" id="msg_fw"></span>
+  </div>
+  <input type="file" id="fw_input" accept=".bin" class="hidden">
+  <div id="fw_box" class="hidden">
+    <div id="fw_status"></div>
+    <div class="bar"><div id="fw_bar"></div></div>
+  </div>
+  <div class="k">Choose <code>.pio/build/JC3248W535EN/firmware.bin</code> from a build. The board installs it
+    in its spare slot and restarts into it; if the new firmware doesn't run properly for a minute, the
+    board goes back to the current one.</div>
+</section>
+
 <footer>Status refreshes every 10 s</footer>
 </main>
 
@@ -428,9 +445,78 @@ async function uploadAll(files) {
 }
 window.addEventListener('beforeunload', ev => { if (uploading) { ev.preventDefault(); ev.returnValue = ''; } });
 
+/* ---------- firmware update ---------- */
+async function loadFirmware() {
+  try {
+    const f = await (await fetch('/api/ota', { cache: 'no-store' })).json();
+    $('fw_info').textContent = `${f.version}  -  built ${f.built}  -  running from ${f.slot}`
+      + (f.pending ? '  (just updated: confirming...)' : '');
+    if (f.rolled_back) say('msg_fw', `Update ${f.rolled_back} did not run properly and was rolled back`, false);
+    return f;
+  } catch (e) {
+    return null;
+  }
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+/** After the restart: poll until the board answers again (up to ~1 min). */
+async function waitForBoard() {
+  await sleep(4000);
+  for (let i = 0; i < 30; i++) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 2000);
+    try {
+      const r = await fetch('/api/ota', { cache: 'no-store', signal: ctl.signal });
+      clearTimeout(t);
+      if (r.ok) return true;
+    } catch (e) { clearTimeout(t); }
+    await sleep(2000);
+  }
+  return false;
+}
+$('btn_fw').onclick = () => $('fw_input').click();
+$('fw_input').onchange = async () => {
+  const file = $('fw_input').files[0];
+  $('fw_input').value = '';
+  if (!file || uploading) return;
+  if (!confirm(`Install ${file.name} (${fmtSize(file.size)}) and restart the board?`)) return;
+  uploading = true;
+  $('msg_fw').textContent = '';
+  $('fw_box').classList.remove('hidden');
+  $('fw_bar').style.width = '0';
+  try {
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/api/ota');
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = ev => {
+        if (!ev.lengthComputable) return;
+        $('fw_bar').style.width = (100 * ev.loaded / ev.total).toFixed(1) + '%';
+        $('fw_status').textContent = `Uploading ${fmtSize(ev.loaded)} of ${fmtSize(ev.total)}`;
+      };
+      xhr.onload = () => xhr.status === 200 ? resolve() : reject(new Error(xhr.responseText || xhr.statusText));
+      xhr.onerror = () => reject(new Error('connection lost'));
+      xhr.send(file);
+    });
+    uploading = false;
+    $('fw_status').textContent = 'Installed - the board is restarting...';
+    if (await waitForBoard()) {
+      const f = await loadFirmware();
+      say('msg_fw', f ? `Updated - now running ${f.version}` : 'Updated', true);
+      loadStatus();
+    } else {
+      say('msg_fw', 'Installed, but the board has not answered yet - reload this page in a moment', false);
+    }
+  } catch (e) {
+    say('msg_fw', 'Update failed: ' + e.message, false);
+  }
+  uploading = false;
+  $('fw_box').classList.add('hidden');
+};
+
 loadSettings();
 loadStatus();
 loadFiles('/');
+loadFirmware();
 setInterval(loadStatus, 10000);
 </script>
 </body>

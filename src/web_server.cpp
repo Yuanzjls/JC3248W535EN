@@ -18,6 +18,7 @@
 #include "weather.h"
 #include "weather_ui.h"
 #include "web_page.h"
+#include "ota_update.h"
 #include "web_files.h"
 #include "wifi_net.h"
 
@@ -312,5 +313,6 @@ void web_server_start(void) {
         httpd_register_uri_handler(s_server, &r);
     }
     web_files_register(s_server);
+    ota_web_register(s_server);
     serial_log("[web] server started on port %u", (unsigned)cfg.server_port);
 }

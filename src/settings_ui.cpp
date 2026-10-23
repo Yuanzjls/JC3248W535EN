@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "clock_ui.h"
+#include "ota_update.h"
 #include "status_bar.h"
 #include "sysmon.h"
 #include "ui_font.h"
@@ -172,7 +173,7 @@ static void sync_from_state(void) {
         about += "not connected";
     }
     about += "\nUptime  " + std::to_string(now_ms() / 60000UL) + " min";
-    about += "\nBuild  " __DATE__ " " __TIME__;
+    about += "\nFirmware  " + std::string(ota_version()) + "  (" + ota_slot() + ")";
     lv_label_set_text(s_about, about.c_str());
 }
 
