@@ -1,6 +1,6 @@
 #include "weather.h"
 
-#include <ArduinoJson.h>
+#include "psram_json.h"
 #include <algorithm>
 #include <esp_http_client.h>
 #include <stdio.h>
@@ -96,25 +96,11 @@ static void load_ini(void) {
                s_cfg.name.c_str(), s_cfg.units);
 }
 
-/** GET url into *out. Returns false (and sets status) on failure. */
 /*
- * JSON goes to PSRAM. The forecast is ~10 KB of JSON and thousands of small nodes; as a String
- * body plus a default-allocated document it was a ~25 KB spike in internal RAM on every refresh
- * (everything < 4 KB lands there), which together with BLE drove free internal RAM down to 2 KB.
+ * JSON goes to PSRAM (psram_json.h). The forecast is ~10 KB of JSON and thousands of small nodes;
+ * as a String body plus a default-allocated document it was a ~25 KB spike in internal RAM on every
+ * refresh (everything < 4 KB lands there), which together with BLE drove free internal RAM to 2 KB.
  */
-struct PsramJsonAllocator : ArduinoJson::Allocator {
-    void *allocate(size_t n) override {
-        return heap_caps_malloc_prefer(n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-    void deallocate(void *p) override {
-        heap_caps_free(p);
-    }
-    void *reallocate(void *p, size_t n) override {
-        return heap_caps_realloc_prefer(p, n, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    }
-};
-static PsramJsonAllocator s_json_alloc;
 
 /**
  * ArduinoJson reader over an open esp_http_client: the body is parsed as it arrives (chunked
@@ -193,7 +179,7 @@ static bool http_get_json(const char *url, JsonDocument &doc) {
 
 /** Fill lat/lon/name/units from ip-api.com when /weather.ini doesn't give coordinates. */
 static bool geolocate(void) {
-    JsonDocument doc(&s_json_alloc);
+    JsonDocument doc(&g_psram_json);
     if (!http_get_json("http://ip-api.com/json/?fields=status,countryCode,city,lat,lon", doc)) {
         return false;
     }
@@ -230,7 +216,7 @@ static bool fetch_forecast(WeatherData *wd) {
              s_cfg.lat, s_cfg.lon, (int)k_weather_days,
              fahrenheit ? "&temperature_unit=fahrenheit&wind_speed_unit=mph" : "");
 
-    JsonDocument doc(&s_json_alloc);
+    JsonDocument doc(&g_psram_json);
     if (!http_get_json(url, doc)) {
         return false;
     }

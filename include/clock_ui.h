@@ -12,5 +12,5 @@ void clock_ui_set_timezone(const char *posix);
 /** Show the Clock app (LVGL context / under bsp_display_lock). Opens timezone picker if none saved yet. */
 void clock_ui_open(void);
 
-/** NTP polling (call from Arduino loop). */
+/** NTP polling (call from loop()). */
 void clock_ui_loop(void);
