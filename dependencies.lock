@@ -45,10 +45,10 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.2
+    version: 6.1.0
 direct_dependencies:
 - espressif/esp_new_jpeg
 - h2zero/esp-nimble-cpp
 manifest_hash: 7223ec6f473552a928a5dd561ce0832514fa07114349561bb31d13c14b9db338
 target: esp32s3
-version: 2.0.0
+version: 3.0.0

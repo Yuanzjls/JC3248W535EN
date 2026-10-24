@@ -14,7 +14,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from SCons.Script import AlwaysBuild
@@ -66,18 +65,29 @@ def run(cmd):
         env.Exit(1)
 
 
+# What ESP-IDF 6.1's build needs from Python (the versions PlatformIO's ESP-IDF builder installs),
+# plus esptool (bootloader and app images) from PlatformIO's own package.
+PYTHON_DEPS = [
+    "cryptography~=46.0.0",
+    "pyparsing>=3.1.0,<4",
+    "idf-component-manager~=3.1.0",
+    "esp-idf-kconfig~=3.13.0",
+]
+
+
 def ensure_python():
+    """Create the Python environment once, as PlatformIO's ESP-IDF builder would (it doesn't run)."""
+    if PYTHON.is_file() and not subprocess.run(
+        [str(PYTHON), "-c", "import esptool, kconfgen, idf_component_manager"], capture_output=True
+    ).returncode:
+        return
+    uv = PIO_DIR / "penv" / ("Scripts/uv.exe" if os.name == "nt" else "bin/uv")
     if not PYTHON.is_file():
-        sys.stderr.write(
-            "Error: ESP-IDF's Python environment %s is missing. PlatformIO's ESP-IDF builder "
-            "creates it; this build doesn't run that builder.\n" % IDF_VENV
-        )
-        env.Exit(1)
-    # ESP-IDF's build calls esptool (bootloader and app images), which PlatformIO keeps in its own
-    # package rather than in this environment: install that package into it once.
-    if subprocess.run([str(PYTHON), "-c", "import esptool"], capture_output=True).returncode:
-        uv = PIO_DIR / "penv" / ("Scripts/uv.exe" if os.name == "nt" else "bin/uv")
-        run([uv, "pip", "install", "--python", PYTHON, pkg_dir("tool-esptoolpy")])
+        run([uv, "venv", "--quiet", "--python", env.subst("$PYTHONEXE"), IDF_VENV])
+    deps = PYTHON_DEPS + [str(pkg_dir("tool-esptoolpy"))]
+    if os.name == "nt":
+        deps.append("windows-curses")  # menuconfig
+    run([uv, "pip", "install", "--python", PYTHON] + deps)
 
 
 def ensure_configured():
@@ -177,3 +187,18 @@ def build_program(env):
 
 
 env.AddMethod(build_program, "BuildProgram")
+
+
+def menuconfig(target, source, env):
+    ensure_configured()
+    run([pkg_dir("tool-cmake") / "bin" / "cmake", "--build", IDF_BUILD_DIR, "--target", "menuconfig"])
+
+
+# PlatformIO's ESP-IDF builder, which normally provides this target, doesn't run.
+env.AddCustomTarget(
+    "menuconfig",
+    None,
+    env.VerboseAction(menuconfig, "Running ESP-IDF menuconfig"),
+    title="Menuconfig",
+    description="Run ESP-IDF's menuconfig (edits sdkconfig.JC3248W535EN)",
+)

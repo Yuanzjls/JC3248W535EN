@@ -10,7 +10,10 @@ UI with LVGL 8.3.
 
 ## Build
 
-Plain ESP-IDF 5.5 (CMake / FreeRTOS), built with PlatformIO (`framework = espidf`). PlatformIO
+Plain ESP-IDF 6.1 (CMake / FreeRTOS), built with PlatformIO 6.2 or newer (`framework = espidf`,
+pioarduino's platform - see `platformio.ini`). On Windows, enable long paths once (ESP-IDF 6.1
+has paths over 260 characters): `LongPathsEnabled` = 1 in
+`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`, as administrator. PlatformIO
 supplies ESP-IDF, the tools and the libraries; `scripts/idf_build.py` then builds with ESP-IDF's
 own CMake + Ninja build (as `idf.py build` does) into `.pio/build/JC3248W535EN/idf/`.
 

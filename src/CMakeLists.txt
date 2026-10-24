@@ -14,7 +14,7 @@ idf_component_register(SRCS ${app_sources}
                            app_update                  # OTA slots and rollback (ota_update)
                            bootloader_support          # image header check (ota_update)
                            bt                          # BLE controller + NimBLE host (Air)
-                           driver                      # legacy I2C driver (touch, esp_bsp.c)
+                           esp_driver_i2c              # touch (esp_bsp.c)
                            esp_driver_gpio
                            esp_driver_i2s              # speaker (audio_player)
                            esp_driver_ledc             # backlight
