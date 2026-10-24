@@ -10,7 +10,9 @@ UI with LVGL 8.3.
 
 ## Build
 
-Plain ESP-IDF 5.5 (CMake / FreeRTOS), built with PlatformIO (`framework = espidf`):
+Plain ESP-IDF 5.5 (CMake / FreeRTOS), built with PlatformIO (`framework = espidf`). PlatformIO
+supplies ESP-IDF, the tools and the libraries; `scripts/idf_build.py` then builds with ESP-IDF's
+own CMake + Ninja build (as `idf.py build` does) into `.pio/build/JC3248W535EN/idf/`.
 
 ```
 pio run            # build
@@ -36,7 +38,9 @@ The firmware version shown (web page, Settings > About) is `git describe` at bui
   `CMakeLists.txt`); add a component there when the code starts using one.
 - ESP-IDF components (`esp-nimble-cpp`, `esp_new_jpeg`): `src/idf_component.yml`, fetched into
   `managed_components/` on the first build.
-- Libraries (LVGL, ArduinoJson, JPEGDEC, PNGdec): `lib_deps` in `platformio.ini`.
+- Libraries (LVGL, ArduinoJson, JPEGDEC, PNGdec): `lib_deps` in `platformio.ini`, downloaded by
+  PlatformIO into `.pio/libdeps/` and compiled as the components in `components/` (their compile
+  flags are there too).
 - LVGL config: `include/lv_conf.h` (found through `LV_CONF_INCLUDE_SIMPLE`, nothing to copy).
 
 ## microSD card
